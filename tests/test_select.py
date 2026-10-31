@@ -74,6 +74,41 @@ class SelectCommandTests(unittest.TestCase):
         self.assertEqual([item["via"] for item in record["candidates"]], ["codex"])
         self.assertEqual(record["selected"]["profile"], "second")
 
+    def test_select_uses_global_roles_when_project_config_omits_them(self):
+        global_config = self.home / ".config" / "af" / "af.config.json"
+        global_config.parent.mkdir(parents=True)
+        global_config.write_text(json.dumps({"roles": {
+            "writer": [self.candidate("host", "OpenAI", "global-writer")],
+        }}))
+        (self.repo / "af.config.json").write_text(json.dumps({"auto_merge": True}))
+
+        result = self.run_af("select", "--role", "writer")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(result.stdout)
+        self.assertEqual(record["selected"], self.candidate("host", "OpenAI", "global-writer"))
+
+    def test_select_reports_missing_role_when_global_config_is_absent(self):
+        (self.repo / "af.config.json").write_text(json.dumps({"auto_merge": True}))
+
+        result = self.run_af("select", "--role", "writer")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "af: role not configured: writer\n")
+        self.assertEqual(result.stdout, "")
+
+    def test_select_preserves_global_config_error_when_global_file_is_invalid(self):
+        global_config = self.home / ".config" / "af" / "af.config.json"
+        global_config.parent.mkdir(parents=True)
+        global_config.write_text("{")
+        (self.repo / "af.config.json").write_text(json.dumps({"auto_merge": True}))
+
+        result = self.run_af("select", "--role", "writer")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(f"af: invalid global config {global_config.resolve()}:", result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_review_skips_same_company_when_a_distinct_company_is_configured(self):
         self.write_exe("pi")
         self.write_exe("codex")

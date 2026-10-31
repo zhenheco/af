@@ -118,7 +118,14 @@ def load_config(explicit=None, cwd=None, env=None, require=True):
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"invalid config {path}: {exc}") from exc
     validate_config(config)
-    baseline = global_high_risk_patterns(env)
+    global_config = read_global_config(env)
+    if "roles" not in config and global_config is not None and "roles" in global_config:
+        try:
+            validate_config({"roles": global_config["roles"]})
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid global config {global_config_path(env)}: {exc}") from exc
+        config["roles"] = global_config["roles"]
+    baseline = None if global_config is None else global_config.get("high_risk_paths")
     if baseline is not None:
         combined = [*baseline, *config.get("high_risk_paths", [])]
         # Git ignore lets the last matching pattern decide, so dedupe keeps the last occurrence.

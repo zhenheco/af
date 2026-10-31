@@ -29,7 +29,7 @@ class ConfigTests(unittest.TestCase):
         path.write_text(json.dumps(value))
         return path
 
-    def test_project_config_unions_global_risk_patterns_only(self):
+    def test_project_high_risk_patterns_still_union_with_global_baseline(self):
         self.write_json(self.global_config, {
             "high_risk_paths": ["auth/", "billing/", "shared", "shared"],
             "auto_merge": False,
@@ -55,6 +55,43 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(explicit["high_risk_paths"], config["high_risk_paths"])
         self.assertTrue(explicit["auto_merge"])
         self.assertEqual(explicit["tests"], {"full": "true"})
+
+    def test_project_roles_inherit_global_roles_when_omitted(self):
+        global_roles = {
+            "writer": [{"via": "host", "model": "global-writer", "company": "OpenAI"}],
+            "small_review": [{"via": "host", "model": "global-reviewer", "company": "Anthropic"}],
+        }
+        self.write_json(self.global_config, {"roles": global_roles})
+        local = self.write_json(self.base / "project.json", {"auto_merge": True})
+
+        config, _ = load_config(local, env=self.env)
+
+        self.assertEqual(config["roles"], global_roles)
+        self.assertTrue(config["auto_merge"])
+
+    def test_project_roles_replace_global_role_mapping_entirely(self):
+        self.write_json(self.global_config, {"roles": {
+            "writer": [{"via": "host", "model": "global-writer", "company": "OpenAI"}],
+            "small_review": [{"via": "host", "model": "global-reviewer", "company": "Anthropic"}],
+        }})
+        project_roles = {
+            "writer": [{"via": "host", "model": "project-writer", "company": "OpenAI"}],
+        }
+        local = self.write_json(self.base / "project.json", {"roles": project_roles})
+
+        config, _ = load_config(local, env=self.env)
+
+        self.assertEqual(config["roles"], project_roles)
+
+    def test_empty_project_roles_do_not_inherit_global_roles(self):
+        self.write_json(self.global_config, {"roles": {
+            "writer": [{"via": "host", "model": "global-writer", "company": "OpenAI"}],
+        }})
+        local = self.write_json(self.base / "project.json", {"roles": {}})
+
+        config, _ = load_config(local, env=self.env)
+
+        self.assertEqual(config["roles"], {})
 
     def test_merge_keeps_a_single_copy_of_patterns_duplicated_across_configs(self):
         self.write_json(self.global_config, {"high_risk_paths": ["billing/"]})
@@ -99,6 +136,30 @@ class ConfigTests(unittest.TestCase):
                         load_config(source, env=self.env)
                     self.assertTrue(str(caught.exception).startswith(
                         f"invalid global config {self.global_config.resolve()}:"))
+
+    def test_invalid_global_roles_fail_closed(self):
+        local = self.write_json(self.base / "project.json", {"auto_merge": True})
+        self.write_json(self.global_config, {"roles": {
+            "writer": [{"via": "host", "model": "missing-company"}],
+        }})
+
+        with self.assertRaises(RuntimeError) as caught:
+            load_config(local, env=self.env)
+
+        self.assertTrue(str(caught.exception).startswith(
+            f"invalid global config {self.global_config.resolve()}:"))
+
+    def test_non_string_global_role_via_error_includes_global_config_path(self):
+        local = self.write_json(self.base / "project.json", {"auto_merge": True})
+        self.write_json(self.global_config, {"roles": {
+            "writer": [{"via": [], "model": "global-writer", "company": "OpenAI"}],
+        }})
+
+        with self.assertRaises(RuntimeError) as caught:
+            load_config(local, env=self.env)
+
+        self.assertIn("invalid global config", str(caught.exception))
+        self.assertIn(str(self.global_config.resolve()), str(caught.exception))
 
     def test_unreadable_global_baseline_fails_closed(self):
         local = self.write_json(self.base / "project.json", {"high_risk_paths": []})
