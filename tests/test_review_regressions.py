@@ -136,11 +136,11 @@ class AfRegressionTests(unittest.TestCase):
         self.assertIn("after the last started", refused.stderr)
 
     def test_quota_exhausted_independent_review_waits_without_same_company_fallback(self):
-        worktree, _ = self.create_flow("review-quota")
         self.write_config(roles={"small_review": [
             {"via": "codex", "profile": "same-company", "company": "Anthropic"},
             {"via": "pi", "provider": "openai", "model": "independent", "company": "OpenAI"}]},
             quota_stop={"exit_statuses": [75], "patterns": []})
+        worktree, _ = self.create_flow("review-quota")
         environment = dict(self.env, FAKE_PI_MODE="quota")
         result = self.run_af("dispatch", "--worktree", worktree, "--flow-id", "review-quota",
                              "--role", "small_review", "--writer-company", "Anthropic",

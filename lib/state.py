@@ -7,8 +7,8 @@ import json
 import os
 from pathlib import Path
 
-from config import load_config
-from worktree import common_dir, git_output, repository_root, validate_flow_id
+from config import config_digest, load_config, load_recorded_config
+from worktree import common_dir, git_output, repository_root, reused_from, validate_flow_id
 
 def flow_records_directory(repo):
     return common_dir(repo) / ".af" / "flows"
@@ -69,7 +69,7 @@ def add_state_parser(commands):
     add.add_argument("--steps", nargs="+", required=True)
 
 def start_flow(args):
-    _, config_path = load_config(args.config, cwd=args.repo)
+    config, config_path = load_config(args.config, cwd=args.repo)
     root = repository_root(args.repo)
     path = state_path(root, args.flow_id)
     if (root != Path(args.repo).resolve()
@@ -81,10 +81,14 @@ def start_flow(args):
             raise RuntimeError(f"flow already exists: {args.flow_id}")
         base = git_output(args.repo, "rev-parse", "--verify", f"{args.base_sha}^{{commit}}")
         timestamp = now()
+        original = reused_from(root, f"af/{args.flow_id}")
         data = {"flow_id": args.flow_id, "base_sha": base, "config_path": str(config_path),
+                "config_sha256": config_digest(config),
                 "worktree_path": str(root), "updated_at": timestamp,
                 "status": "active", "current_step": 0,
                 "steps": [step_record(name) for name in args.chain]}
+        if original is not None:
+            data.update({"reused": True, "original_branch": original or None})
         write_record(path, data)
     emit({"flow_id": args.flow_id, "state_path": str(path), "status": "active", "base_sha": base})
 
@@ -175,11 +179,7 @@ def add_steps(args):
     emit({"flow_id": args.flow_id, "after": args.after, "added": args.steps, "chain": chain})
 
 def flow_config(args):
-    record = read_record(state_path(args.repo, args.flow_id))
-    config_path = record.get("config_path")
-    if not config_path:
-        raise RuntimeError(f"flow {args.flow_id} has no recorded config path")
-    return load_config(config_path, cwd=args.repo)[0]
+    return load_recorded_config(read_record(state_path(args.repo, args.flow_id)), args.repo)
 
 def run_state(args):
     if args.state_action in ("advance", "resume"):

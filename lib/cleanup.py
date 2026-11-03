@@ -8,7 +8,7 @@ import shutil
 
 from config import load_config
 from state import flow_records_directory
-from worktree import common_dir, validate_flow_id
+from worktree import common_dir, git, primary_checkout, remove_flow, validate_flow_id
 
 def record_age(record, now):
     try:
@@ -29,7 +29,7 @@ def archive_location(repo, retention):
     name = f"{Path(repo).resolve().name}-{digest}"
     return path.resolve() / name
 
-def cleanup_records(repo, config):
+def cleanup_records(repo, config, keep=()):
     now = datetime.now(timezone.utc)
     retention = config.get("record_retention", {})
     archive_days = retention.get("archive_after_days", 30)
@@ -54,7 +54,7 @@ def cleanup_records(repo, config):
         if not isinstance(record, dict) or record.get("flow_id") != path.stem:
             continue
         age = record_age(record, now)
-        if age is None or record.get("status") not in ("complete", "stopped"):
+        if age is None or record.get("status") not in ("complete", "stopped") or path.stem in keep:
             continue
 
         log_path = (archive / f"{path.stem}.logs" if archived else logs / path.stem)
@@ -78,11 +78,49 @@ def cleanup_records(repo, config):
         moved.append(path.stem)
     return {"moved": moved, "deleted": deleted}
 
+def cleanup_worktrees(repo):
+    removed, skipped = [], []
+    for path in sorted(flow_records_directory(repo).glob("*.json")):
+        try:
+            record = json.loads(path.read_text())
+            validate_flow_id(path.stem)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict) or record.get("status") != "complete":
+            continue
+        if record.get("flow_id") != path.stem:
+            skipped.append({"flow_id": path.stem, "reason": "flow record id does not match its filename"})
+            continue
+        lookup = git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/af/{path.stem}", check=False)
+        # Exit 1 means the branch is gone because an earlier run removed it; other failures are errors.
+        if lookup.returncode == 1:
+            continue
+        if lookup.returncode:
+            skipped.append({"flow_id": path.stem, "reason": lookup.stderr.strip() or "cannot read flow branch"})
+            continue
+        try:
+            remove_flow(repo, path.stem)
+            removed.append(path.stem)
+        except RuntimeError as exc:
+            skipped.append({"flow_id": path.stem, "reason": str(exc)})
+    return {"removed": removed, "skipped": skipped}
+
 def add_cleanup_parser(commands):
     parser = commands.add_parser("cleanup", help="archive and expire completed flows")
     parser.add_argument("--repo", required=True)
     parser.add_argument("--config")
+    parser.add_argument("--worktrees", action="store_true",
+                        help="also remove worktrees and branches of completed flows proven merged")
 
 def run_cleanup(args):
     config, _ = load_config(args.config, cwd=args.repo, require=bool(args.config))
-    print(json.dumps(cleanup_records(args.repo, config), ensure_ascii=False))
+    if args.worktrees:
+        # Work from the primary checkout: --repo may be a flow worktree that this run removes.
+        args.repo = str(primary_checkout(args.repo))
+    worktrees = cleanup_worktrees(args.repo) if args.worktrees else None
+    # Keep records of skipped flows so a later run can retry their removal.
+    kept = [item["flow_id"] for item in worktrees["skipped"]] if worktrees else ()
+    result = cleanup_records(args.repo, config, kept)
+    if worktrees is not None:
+        result["worktrees"] = worktrees
+    print(json.dumps(result, ensure_ascii=False))

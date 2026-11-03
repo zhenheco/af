@@ -1,6 +1,7 @@
 import json
 import hashlib
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -136,6 +137,119 @@ class CleanupCommandTests(unittest.TestCase):
         self.assertTrue(active.exists())
         self.assertTrue((self.common_dir / ".af" / "logs" / "active-with-logs" /
                          active_logs[0].name).is_file())
+    def flow_worktree(self, flow_id, status, age_days=1):
+        created = self.run_af("worktree", "create", "--repo", str(self.repo), "--flow-id", flow_id)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        worktree = Path(json.loads(created.stdout)["path"])
+        (worktree / f"{flow_id}.txt").write_text("change\n")
+        git(worktree, "add", ".")
+        git(worktree, "commit", "-qm", flow_id)
+        record = json.loads(self.write_record(flow_id, age_days).read_text())
+        record.update({"status": status, "worktree_path": str(worktree)})
+        (self.flows / f"{flow_id}.json").write_text(json.dumps(record))
+        return worktree
+
+    def fake_merged_gh(self, *branches):
+        bin_dir = self.base / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / "gh").write_text("#!/bin/sh\n"
+                                    "case \" $FAKE_GH_MERGED \" in *\" $3 \"*) state=MERGED ;; *) state=OPEN ;; esac\n"
+                                    "printf '{\"state\":\"%s\",\"headRefOid\":\"%s\"}' \"$state\" "
+                                    "\"$(git rev-parse \"refs/heads/$3\")\"\n")
+        (bin_dir / "gh").chmod(0o755)
+        self.env["PATH"] = f"{bin_dir}{os.pathsep}{self.env['PATH']}"
+        self.env["FAKE_GH_MERGED"] = " ".join(branches)
+        return bin_dir
+
+    def cleanup_worktrees(self, repo=None):
+        result = self.run_af("cleanup", "--repo", str(repo or self.repo), "--config", str(self.config),
+                             "--worktrees")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_worktrees_flag_removes_only_completed_flows_proven_merged(self):
+        self.fake_merged_gh("af/merged-done", "af/merged-active")
+        merged = self.flow_worktree("merged-done", "complete")
+        open_pr = self.flow_worktree("open-done", "complete")
+        active = self.flow_worktree("merged-active", "active")
+
+        plain = self.run_af("cleanup", "--repo", str(self.repo), "--config", str(self.config))
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertNotIn("worktrees", json.loads(plain.stdout))
+        self.assertTrue(merged.exists())
+
+        result = self.run_af("cleanup", "--repo", str(self.repo), "--config", str(self.config),
+                             "--worktrees")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)["worktrees"]
+        self.assertEqual(report["removed"], ["merged-done"])
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["open-done"])
+        self.assertIn("not merged", report["skipped"][0]["reason"])
+        self.assertFalse(merged.exists())
+        self.assertEqual(git(self.repo, "branch", "--list", "af/merged-done"), "")
+        self.assertTrue(open_pr.exists())
+        self.assertTrue(active.exists())
+
+        again = self.run_af("cleanup", "--repo", str(self.repo), "--config", str(self.config),
+                            "--worktrees")
+        self.assertEqual(json.loads(again.stdout)["worktrees"]["removed"], [])
+
+    def test_worktrees_flag_keeps_expired_records_of_skipped_flows_for_retry(self):
+        bin_dir = self.base / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "gh").write_text("#!/bin/sh\nexit 1\n")
+        (bin_dir / "gh").chmod(0o755)
+        self.env["PATH"] = f"{bin_dir}{os.pathsep}{self.env['PATH']}"
+        worktree = self.flow_worktree("offline", "complete", age_days=200)
+        result = self.run_af("cleanup", "--repo", str(self.repo), "--config", str(self.config),
+                             "--worktrees")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual([item["flow_id"] for item in report["worktrees"]["skipped"]], ["offline"])
+        self.assertNotIn("offline", report["deleted"])
+        self.assertTrue((self.flows / "offline.json").is_file())
+        self.assertTrue(worktree.exists())
+
+    def test_worktrees_flag_skips_records_whose_content_names_another_flow(self):
+        self.fake_merged_gh("af/in-use")
+        worktree = self.flow_worktree("in-use", "complete", age_days=200)
+        record = json.loads((self.flows / "in-use.json").read_text())
+        record["flow_id"] = "someone-else"
+        (self.flows / "in-use.json").write_text(json.dumps(record))
+        report = self.cleanup_worktrees()
+        self.assertEqual(report["worktrees"]["removed"], [])
+        self.assertEqual([item["flow_id"] for item in report["worktrees"]["skipped"]], ["in-use"])
+        self.assertTrue(worktree.exists())
+        self.assertTrue((self.flows / "in-use.json").is_file())
+
+    def test_worktrees_flag_skips_flows_whose_branch_lookup_errors(self):
+        bin_dir = self.fake_merged_gh("af/ref-error")
+        worktree = self.flow_worktree("ref-error", "complete", age_days=200)
+        real_git = shutil.which("git")
+        (bin_dir / "git").write_text("#!/bin/sh\n"
+                                     "for arg in \"$@\"; do [ \"$arg\" = show-ref ] && exit 128; done\n"
+                                     f"exec {real_git} \"$@\"\n")
+        (bin_dir / "git").chmod(0o755)
+        report = self.cleanup_worktrees()
+        self.assertEqual([item["flow_id"] for item in report["worktrees"]["skipped"]], ["ref-error"])
+        self.assertTrue((self.flows / "ref-error.json").is_file())
+        self.assertTrue(worktree.exists())
+
+    def test_worktrees_flag_works_when_run_from_the_removed_flow_worktree(self):
+        self.fake_merged_gh("af/from-inside")
+        worktree = self.flow_worktree("from-inside", "complete")
+        report = self.cleanup_worktrees(repo=worktree)
+        self.assertEqual(report["worktrees"]["removed"], ["from-inside"])
+        self.assertFalse(worktree.exists())
+
+    def test_worktrees_flag_keeps_skipped_records_past_the_archive_threshold(self):
+        self.fake_merged_gh()
+        self.flow_worktree("open-archive", "complete", age_days=40)
+        report = self.cleanup_worktrees()
+        self.assertEqual([item["flow_id"] for item in report["worktrees"]["skipped"]], ["open-archive"])
+        self.assertNotIn("open-archive", report["moved"])
+        self.assertTrue((self.flows / "open-archive.json").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

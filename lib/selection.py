@@ -4,7 +4,7 @@ import json
 import os
 import shutil
 
-from config import load_config
+from config import load_config, load_recorded_config
 from state import read_record, state_path
 
 REVIEW_ROLES = {"small_review", "big_review"}
@@ -46,13 +46,9 @@ def add_select_parser(commands):
 
 def run_select(args):
     if args.flow_id:
-        record = read_record(state_path(args.repo, args.flow_id))
-        config_path = record.get("config_path")
-        if not config_path:
-            raise RuntimeError(f"flow {args.flow_id} has no recorded config path")
+        config = load_recorded_config(read_record(state_path(args.repo, args.flow_id)), args.repo)
     else:
-        config_path = args.config
-    config, _ = load_config(config_path, cwd=args.repo)
+        config, _ = load_config(args.config, cwd=args.repo)
     result = choose(args.role, config, args.writer_company)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result["selected"] else 2

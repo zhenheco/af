@@ -298,7 +298,7 @@ class SelectCommandTests(unittest.TestCase):
                               "--base-sha", git(self.repo, "rev-parse", "HEAD"),
                               "--config", str(unsafe), "--chain", "tdd")
         self.assertNotEqual(started.returncode, 0)
-        self.assertIn("linked worktree on af/* branch", started.stderr)
+        self.assertIn("worktree on af/* branch", started.stderr)
         common = Path(git(self.repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
         self.assertFalse((common / ".af" / "flows" / "unsafe-config.json").exists())
 
@@ -307,7 +307,16 @@ class SelectCommandTests(unittest.TestCase):
         self.env["AF_CONFIG"] = str(alias)
         selected = self.run_af("select", "--role", "writer", cwd=linked)
         self.assertNotEqual(selected.returncode, 0)
-        self.assertIn("linked worktree on af/* branch", selected.stderr)
+        self.assertIn("worktree on af/* branch", selected.stderr)
+
+    def test_config_inside_primary_checkout_on_af_branch_is_refused(self):
+        unsafe = self.repo / "af.config.json"
+        unsafe.write_text(json.dumps({"roles": {"writer": [
+            self.candidate("host", "Anthropic", "claude-sonnet")]}}))
+        git(self.repo, "switch", "-q", "-c", "af/primary-config")
+        selected = self.run_af("select", "--role", "writer", "--config", str(unsafe))
+        self.assertNotEqual(selected.returncode, 0)
+        self.assertIn("worktree on af/* branch", selected.stderr)
 
 
 if __name__ == "__main__":

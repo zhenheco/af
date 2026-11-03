@@ -1,11 +1,11 @@
 ---
 name: af
-description: Chain Matt Pocock skills in a dedicated Git worktree with explicit test, review, and commit gates.
+description: Chain Matt Pocock skills in a dedicated Git worktree (or the current app worktree) with explicit test, review, and commit gates.
 ---
 
 # af
 
-Use af-lite to run an ordered Matt Pocock skill flow. The skills and worker CLIs are installed separately. af-lite creates the sibling worktree, records steps, selects optional `pi`, `codex`, or `claude` workers or a host handoff, runs configured tests, scans host commits, and checks the final decision.
+Use af-lite to run an ordered Matt Pocock skill flow. The skills and worker CLIs are installed separately. af-lite creates the sibling worktree or reuses the current linked worktree, records steps, selects optional `pi`, `codex`, or `claude` workers or a host handoff, runs configured tests, scans host commits, and checks the final decision.
 
 ## Start a flow
 
@@ -17,13 +17,21 @@ Use af-lite to run an ordered Matt Pocock skill flow. The skills and worker CLIs
 
    Doctor checks the ten flow skills: `grill-with-docs`, `to-spec`, `to-tickets`, `implement-spec`, `implement`, `tdd`, `code-review`, `diagnosing-bugs`, `pr`, and `retro`. It warns if `docs/agents/issue-tracker.md` or `docs/agents/domain.md` is missing; it reports `high_risk.baseline_count`, `effective_count`, and `warnings`, setting `baseline_count` to `null` when the global baseline is invalid, `effective_count` to `null` when the project config or global baseline is invalid, and adding a warning for zero `effective_count` without changing `ok`.
 
-2. Create a unique flow ID. Keep the returned sibling worktree path and `base_sha`:
+2. Create a unique flow ID. Keep the returned worktree `path` and `base_sha`.
+
+   In a Claude app worktree session, or any clean linked worktree that will host a single writer, reuse it. This switches it to `af/<id>` from its current HEAD and records the original branch:
+
+   ```sh
+   af worktree create --repo /path/to/current-worktree --flow-id <id> --reuse-current
+   ```
+
+   Create a sibling worktree instead when two or more writers run in parallel, when the host keeps editing its own worktree while the writer runs, or when the current worktree has uncommitted changes. `--reuse-current` refuses the primary checkout, a dirty worktree, and a worktree already held by another active flow:
 
    ```sh
    af worktree create --repo /path/to/repository --flow-id <id>
    ```
 
-3. Start a flow from its worktree using the chosen ordered skills:
+3. Start a flow from the returned `path` (shown below as the sibling `/path/to/repository-<id>`) using the chosen ordered skills:
 
    ```sh
    af state start --repo /path/to/repository-<id> --flow-id <id> --base-sha <base_sha> --chain <skill> [<skill> ...]
@@ -85,7 +93,7 @@ Only continue to the project's normal PR process when the decision is `merge`. A
 
 ## Config and cleanup
 
-Config resolves from `--config`, `$AF_CONFIG`, the primary checkout's `af.config.json`, then `~/.config/af/af.config.json`. Any resolved config path inside a linked worktree on an `af/*` branch is refused. `state start` records the resolved config path.
+Config resolves from `--config`, `$AF_CONFIG`, the primary checkout's `af.config.json`, then `~/.config/af/af.config.json`. Any resolved config path inside a worktree on an `af/*` branch, including the primary checkout, is refused. `state start` records the resolved config path and the SHA-256 of the effective config, including inherited global `roles` and `high_risk_paths`; `state advance`/`resume`, `select --flow-id`, `dispatch`, and `gate test`/`commit`/`decide` fail closed with `config changed since flow start` if it changes during the flow.
 When a project config is selected, it inherits `roles` from `$HOME/.config/af/af.config.json` only when the project omits the `roles` key; a project `roles` map replaces it entirely, with no per-role merge. An invalid inherited role map fails closed as an invalid global config, and selecting a role absent from the resolved map reports `role not configured: <role>`. The global `high_risk_paths` baseline is prepended to the project's list; duplicates keep their last occurrence. Other global fields are not inherited.
 
 Pi candidates may set `tools` to a non-empty list passed to Pi with MCP disabled. Without a shell tool, the worker cannot run `wrangler`, `gh`, `git`, or `curl`; Pi's `write` and `edit` tools are not path-confined. On Claude candidates, `tools` removes the shell tool (the CLI is started with `--tools`, `--permission-mode acceptEdits` and `--strict-mcp-config`), but af passes no flag that turns off user or project settings or hooks, so hooks and settings `env` entries still apply, and the file tools are not confined to the worktree. `env_allow` may be empty and keeps standard runtime, locale, proxy, and CA variables plus listed names set in the parent. It removes tokens from the environment, but not credential files on disk or Pi's own credential file. Claude Code CLI candidates use `model` and accept the same optional `tools` (passed as `--tools ... --permission-mode acceptEdits --strict-mcp-config`) and `env_allow`. Claude candidates also accept `base_url` plus `api_key_command` (both required together, `https://` only), which point the Claude CLI at another vendor's Anthropic-compatible endpoint: af then starts `claude --bare` (which skips user and project settings and hooks), runs the command for the key, passes it as `ANTHROPIC_API_KEY` with `ANTHROPIC_BASE_URL`, and removes `ANTHROPIC_AUTH_TOKEN`; a failed or empty key command fails the attempt without starting the CLI.
@@ -95,6 +103,7 @@ af state status --repo /path/to/repository-<id> --flow-id <id>
 af state stop --repo /path/to/repository-<id> --flow-id <id>
 af worktree remove --repo /path/to/repository --flow-id <id>
 af cleanup --repo /path/to/repository
+af cleanup --repo /path/to/repository --worktrees
 ```
 
-Worktree removal refuses tracked changes, untracked non-ignored files, and branches not merged into the recorded base; use `--force` only after reviewing the work. Cleanup archives or deletes only completed or stopped records and their logs according to `record_retention`.
+Worktree removal refuses tracked changes and untracked non-ignored files. It accepts the branch as merged when it is an ancestor of the recorded base, or, for squash merges, when `gh pr view af/<id>` reports `MERGED` with `headRefOid` equal to the local branch tip; a missing `gh` or failed query refuses removal. Use `--force` only after reviewing the work. A reused flow never removes the worktree: removal switches it back to the original branch and deletes `af/<id>`, and refuses a dirty worktree even with `--force`. `cleanup --worktrees` applies the same removal to completed flows lists the ones it skipped with the reason, and keeps their records for a later retry. Cleanup archives or deletes only completed or stopped records and their logs according to `record_retention`.

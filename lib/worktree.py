@@ -1,4 +1,4 @@
-"""Create and safely remove af-owned sibling Git worktrees."""
+"""Create and safely remove af flow worktrees: owned siblings or a reused linked worktree."""
 
 import json
 import re
@@ -42,9 +42,56 @@ def add_worktree_parser(commands):
         action.add_argument("--flow-id", required=True)
         if name == "remove":
             action.add_argument("--force", action="store_true")
+        else:
+            action.add_argument("--reuse-current", action="store_true",
+                                help="switch this clean linked worktree to af/<id> instead of adding a sibling")
 
-def create(repo_arg, flow_id):
+REUSED_KEY = "afReusedFrom"
+
+def reused_from(repo, branch):
+    """Return the branch a reused flow came from ("" if detached), or None for sibling flows."""
+    result = git(repo, "config", "--get", f"branch.{branch}.{REUSED_KEY}", check=False)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+def active_flow_at(root):
+    for path in sorted((common_dir(root) / ".af" / "flows").glob("*.json")):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if (isinstance(record, dict) and record.get("status") == "active"
+                and Path(record.get("worktree_path", "")).resolve() == root):
+            return record.get("flow_id", path.stem)
+    return None
+
+def reuse_current(repo_arg, flow_id):
+    root = repository_root(repo_arg)
+    branch = f"af/{flow_id}"
+    if root != Path(repo_arg).resolve() or Path(git_output(root, "rev-parse", "--absolute-git-dir")).resolve() == common_dir(root):
+        raise RuntimeError("--reuse-current requires the top level of a linked worktree, not the primary checkout")
+    if git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout:
+        raise RuntimeError("--reuse-current requires a clean worktree; commit or move other changes first")
+    original = git_output(root, "branch", "--show-current")
+    holder = active_flow_at(root)
+    if original.startswith("af/") or holder:
+        raise RuntimeError(f"worktree is held by active flow {holder or original[3:]}; "
+                           "create a sibling worktree for parallel writers")
+    if git(root, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}", check=False).returncode == 0:
+        raise RuntimeError(f"branch already exists: {branch}")
+    base_sha = git_output(root, "rev-parse", "HEAD")
+    upstream = git_output(root, "rev-parse", "--symbolic-full-name", f"{original}@{{upstream}}",
+                          check=False) if original else ""
+    git(root, "switch", "-q", "-c", branch)
+    git(root, "config", f"branch.{branch}.{REUSED_KEY}", original)
+    if upstream:
+        git(root, "branch", "--set-upstream-to", upstream, branch)
+    print(json.dumps({"flow_id": flow_id, "branch": branch, "path": str(root), "base_sha": base_sha,
+                      "reused": True, "original_branch": original or None}))
+
+def create(repo_arg, flow_id, reuse=False):
     validate_flow_id(flow_id)
+    if reuse:
+        return reuse_current(repo_arg, flow_id)
     repo = primary_checkout(repo_arg)
     branch = f"af/{flow_id}"
     target = flow_path(repo, flow_id)
@@ -60,36 +107,70 @@ def create(repo_arg, flow_id):
         git(repo, "branch", "--set-upstream-to", base_ref, branch)
     print(json.dumps({"flow_id": flow_id, "branch": branch, "path": str(target), "base_sha": base_sha}))
 
-def remove(repo_arg, flow_id, force=False):
+def merged_pull_request(target, branch):
+    """True only when GitHub reports this branch's PR merged at exactly the local tip."""
+    try:
+        result = subprocess.run(["gh", "pr", "view", branch, "--json", "state,headRefOid"], cwd=target,
+                                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        report = json.loads(result.stdout) if result.returncode == 0 else {}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    return (isinstance(report, dict) and report.get("state") == "MERGED"
+            and report.get("headRefOid") == git_output(target, "rev-parse", f"refs/heads/{branch}"))
+
+def merge_proof(repo, target, branch):
+    """Return how the branch is proven merged: "ancestor", "pull-request", or None."""
+    base = git(repo, "rev-parse", "--verify", f"{branch}@{{upstream}}", check=False)
+    if base.returncode == 0 and git(repo, "merge-base", "--is-ancestor", f"refs/heads/{branch}",
+                                    base.stdout.strip(), check=False).returncode == 0:
+        return "ancestor"
+    return "pull-request" if merged_pull_request(target, branch) else None
+
+def remove_flow(repo_arg, flow_id, force=False):
     validate_flow_id(flow_id)
     repo = primary_checkout(repo_arg)
     branch = f"af/{flow_id}"
-    target = flow_path(repo, flow_id)
+    original = reused_from(repo, branch)
+    record_path = common_dir(repo) / ".af" / "flows" / f"{flow_id}.json"
+    if record_path.exists() and bool(json.loads(record_path.read_text()).get("reused")) != (original is not None):
+        # Guessing wrong would run git worktree remove on a session-owned worktree.
+        raise RuntimeError(f"flow record and branch config disagree on whether {branch} reused its worktree; "
+                           "resolve it by hand")
     output = git_output(repo, "worktree", "list", "--porcelain")
-    entries = (dict(line.partition(" ")[::2] for line in block.splitlines() if line)
-               for block in output.split("\n\n"))
-    entry = next((item for item in entries if Path(item.get("worktree", "")).resolve() == target.resolve()), None)
+    entries = [dict(line.partition(" ")[::2] for line in block.splitlines() if line)
+               for block in output.split("\n\n")]
+    if original is None:
+        target = flow_path(repo, flow_id)
+        entry = next((item for item in entries if Path(item.get("worktree", "")).resolve() == target.resolve()), None)
+    else:
+        entry = next((item for item in entries if item.get("branch") == f"refs/heads/{branch}"), None)
+        target = Path(entry["worktree"]) if entry else None
     if not entry or entry.get("branch") != f"refs/heads/{branch}":
         raise RuntimeError(f"flow worktree not found on {branch}: {target}")
 
     dirty = git(target, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout
-    if dirty and not force:
-        raise RuntimeError("refusing to remove a flow worktree with tracked changes or untracked non-ignored files; review it or use --force")
-    if not force:
-        base = git(repo, "rev-parse", "--verify", f"{branch}@{{upstream}}", check=False)
-        if base.returncode:
-            raise RuntimeError("flow branch has no recorded base; use --force after reviewing it")
-        unmerged = git(repo, "merge-base", "--is-ancestor", f"refs/heads/{branch}", base.stdout.strip(), check=False)
-        if unmerged.returncode:
-            raise RuntimeError("flow branch has commits not merged into its base; use --force after reviewing them")
+    if dirty and (not force or original is not None):
+        # A reused worktree belongs to the session, so even --force never discards its changes.
+        raise RuntimeError("refusing to remove a flow worktree with tracked changes or untracked non-ignored files; review it"
+                           + ("" if original is not None else " or use --force"))
+    proof = None if force else merge_proof(repo, target, branch)
+    if not force and not proof:
+        raise RuntimeError("flow branch is not merged into its base and no merged pull request has the same head; "
+                           "use --force after reviewing it")
 
-    git(repo, "worktree", "remove", *(["--force"] if force else []), str(target))
-    git(repo, "branch", "-D" if force else "-d", branch)
-    print(json.dumps({"flow_id": flow_id, "removed": True, "branch": branch,
-                      "path": str(target)}))
+    if original is None:
+        git(repo, "worktree", "remove", *(["--force"] if force else []), str(target))
+    else:
+        git(target, "switch", "-q", *([original] if original else ["--detach", f"refs/heads/{branch}"]))
+    git(repo, "branch", "-d" if proof == "ancestor" else "-D", branch)
+    return {"flow_id": flow_id, "removed": True, "branch": branch, "path": str(target),
+            "reused": original is not None}
+
+def remove(repo_arg, flow_id, force=False):
+    print(json.dumps(remove_flow(repo_arg, flow_id, force)))
 
 def run_worktree(args):
     if args.worktree_action == "create":
-        create(args.repo, args.flow_id)
+        create(args.repo, args.flow_id, args.reuse_current)
     else:
         remove(args.repo, args.flow_id, args.force)

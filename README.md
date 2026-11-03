@@ -1,6 +1,6 @@
 # af-lite
 
-af-lite chains [Matt Pocock's skills](https://github.com/mattpocock/skills) in a sibling Git worktree. It is POSIX bash plus Python 3 standard library; the upstream skills and worker CLIs remain separately installed.
+af-lite chains [Matt Pocock's skills](https://github.com/mattpocock/skills) in a sibling Git worktree or the current linked worktree. It is POSIX bash plus Python 3 standard library; the upstream skills and worker CLIs remain separately installed.
 
 ## Design
 
@@ -18,7 +18,9 @@ af worktree create --repo /path/to/repository --flow-id example-001
 af state start --repo /path/to/repository-example-001 --flow-id example-001 --base-sha <base-sha> --chain tdd code-review pr retro
 ```
 
-Use the worktree path and `base_sha` returned by creation. Config resolves in this order: `--config`, `$AF_CONFIG`, `<primary checkout>/af.config.json`, `~/.config/af/af.config.json`. Any resolved config path inside a linked worktree on an `af/*` branch is refused. `state start` records the resolved config path; flow commands use it.
+Inside a clean linked worktree that will host a single writer, such as a Claude app worktree session, use `af worktree create --repo <current worktree> --flow-id <id> --reuse-current` instead: it switches that worktree to `af/<id>` from its HEAD, records the original branch, and refuses the primary checkout, a dirty worktree, or one already held by another active flow. Use sibling worktrees for parallel writers.
+
+Use the worktree path and `base_sha` returned by creation. Config resolves in this order: `--config`, `$AF_CONFIG`, `<primary checkout>/af.config.json`, `~/.config/af/af.config.json`. Any resolved config path inside a worktree on an `af/*` branch, including the primary checkout, is refused. `state start` records the resolved config path and the SHA-256 of the effective config after global `roles` and `high_risk_paths` are merged in; `state advance`/`resume`, `select --flow-id`, `dispatch`, and `gate test`/`commit`/`decide` use that path and fail closed if the effective config has changed.
 
 Advance one step before running it. Run Matt skills in the host as appropriate; dispatch can use installed `pi`, `codex`, or `claude` CLIs or return a `host` subagent handoff. Run focused tests and host commit explicit paths before review. Use `state add-steps` to insert ordered ticket steps. Run full tests and reviews before `gate decide`; only a `merge` result allows the project's normal PR process.
 
@@ -35,7 +37,7 @@ Configured worker candidates are tried in order; missing `pi`, `codex`, and `cla
 
 `gate commit` requires branch `af/<flow-id>`, accepts explicit changed paths only, rejects absolute paths, `..` path components, absolute symlink targets, and symlinks that resolve outside the worktree, then scans staged changes with `gitleaks protect --staged` or a secret-pattern scan of added lines. Relative symlink targets may contain `..` when they resolve inside the worktree. It restores the prior index if a check refuses the commit. `gate decide` requires passing tests and reviews, a clean worktree, and no high-risk paths; otherwise it blocks or returns `ask`. High-risk matches use Git ignore patterns and check committed changes from the recorded base through the flow branch.
 
-Worktree removal refuses tracked changes, untracked non-ignored files, and branches not merged into their recorded base; `--force` overrides both checks. Cleanup archives or deletes only completed or stopped flow records and their logs after the configured ages.
+Worktree removal refuses tracked changes and untracked non-ignored files. A branch counts as merged when it is an ancestor of its recorded base, or when `gh pr view af/<id> --json state,headRefOid` reports `MERGED` at the local branch tip (squash merges); if `gh` is missing or the query fails, removal is refused. `--force` overrides both checks for sibling worktrees. A reused worktree is never removed: af switches it back to its original branch and deletes `af/<id>`, and refuses a dirty reused worktree even with `--force`. `af cleanup --worktrees` (off by default) applies the same removal to completed flows, reports skipped flows with reasons, and keeps their records for a later retry. Cleanup archives or deletes only completed or stopped flow records and their logs after the configured ages.
 
 ### Scheduled cleanup
 

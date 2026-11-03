@@ -150,9 +150,9 @@ class StateCommandTests(unittest.TestCase):
         self.assertEqual(updated["steps"][0]["result"], "stale runner released")
 
     def test_stale_after_minutes_comes_from_recorded_config(self):
+        (self.repo / "af.config.json").write_text(json.dumps({"stale_after_minutes": 1}))
         record = self.start()
         state_path = Path(record["state_path"])
-        (self.repo / "af.config.json").write_text(json.dumps({"stale_after_minutes": 1}))
         self.run_af("state", "advance", "--repo", str(self.repo), "--flow-id", "state-001")
         data = json.loads(state_path.read_text())
         data["steps"][0]["started"] = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
@@ -180,6 +180,44 @@ class StateCommandTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         state_path = Path(json.loads(result.stdout)["state_path"])
         self.assertEqual(json.loads(state_path.read_text())["base_sha"], base_sha)
+
+    def test_flow_fails_closed_when_recorded_config_changes(self):
+        record = self.start()
+        state_data = json.loads(Path(record["state_path"]).read_text())
+        config = self.repo / "af.config.json"
+        self.assertRegex(state_data["config_sha256"], r"^[0-9a-f]{64}$")
+        config.write_text('{"stale_after_minutes": 1}\n')
+        advanced = self.run_af("state", "advance", "--repo", str(self.repo), "--flow-id", "state-001")
+        self.assertNotEqual(advanced.returncode, 0)
+        self.assertIn("config changed since flow start", advanced.stderr)
+        decided = self.run_af("gate", "decide", "--repo", str(self.worktree), "--flow-id", "state-001",
+                              "--tests", "pass", "--reviews", "pass")
+        self.assertNotEqual(decided.returncode, 0)
+        self.assertIn("config changed since flow start", decided.stdout)
+        selected = self.run_af("select", "--repo", str(self.worktree), "--flow-id", "state-001",
+                               "--role", "writer")
+        self.assertIn("config changed since flow start", selected.stderr)
+
+    def test_flow_fails_closed_when_inherited_global_config_changes(self):
+        global_config = self.home / ".config" / "af" / "af.config.json"
+        global_config.parent.mkdir(parents=True)
+        global_config.write_text(json.dumps({"high_risk_paths": ["payments/**"]}))
+        self.start()
+        global_config.write_text(json.dumps({"high_risk_paths": []}))
+        advanced = self.run_af("state", "advance", "--repo", str(self.repo), "--flow-id", "state-001")
+        self.assertNotEqual(advanced.returncode, 0)
+        self.assertIn("config changed since flow start", advanced.stderr)
+
+    def test_flow_fails_closed_when_inherited_global_roles_change(self):
+        global_config = self.home / ".config" / "af" / "af.config.json"
+        global_config.parent.mkdir(parents=True)
+        candidate = {"via": "host", "model": "first", "company": "Anthropic"}
+        global_config.write_text(json.dumps({"roles": {"writer": [candidate]}}))
+        self.start()
+        global_config.write_text(json.dumps({"roles": {"writer": [dict(candidate, model="second")]}}))
+        advanced = self.run_af("state", "advance", "--repo", str(self.repo), "--flow-id", "state-001")
+        self.assertNotEqual(advanced.returncode, 0)
+        self.assertIn("config changed since flow start", advanced.stderr)
 
 
 if __name__ == "__main__":

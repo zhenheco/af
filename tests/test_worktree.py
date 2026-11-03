@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -32,6 +33,15 @@ class WorktreeCommandTests(unittest.TestCase):
         git(self.repo, "add", "README.md")
         git(self.repo, "commit", "-qm", "fixture")
         self.checkout_sha = git(self.repo, "rev-parse", "HEAD")
+        self.bin = self.base / "bin"
+        self.bin.mkdir()
+        self.env["PATH"] = f"{self.bin}{os.pathsep}{self.env.get('PATH', '')}"
+        self.gh_log = self.base / "gh-args"
+        (self.bin / "gh").write_text("#!/bin/sh\n"
+                                     f"printf '%s\\n' \"$*\" >> {self.gh_log}\n"
+                                     "printf '%s' \"${FAKE_GH_JSON:-}\"\n"
+                                     "exit ${FAKE_GH_EXIT:-0}\n")
+        (self.bin / "gh").chmod(0o755)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -114,6 +124,168 @@ class WorktreeCommandTests(unittest.TestCase):
         self.assertNotEqual(untracked.returncode, 0)
         self.assertIn("untracked non-ignored files", untracked.stderr)
         self.assertTrue(worktree.exists())
+
+    def app_worktree(self, name="app"):
+        path = self.base / f"{name}-session"
+        git(self.repo, "worktree", "add", "-q", "-b", f"claude/{name}", str(path), "HEAD")
+        return path
+
+    def reuse(self, worktree, flow_id):
+        return self.run_af("worktree", "create", "--repo", str(worktree), "--flow-id", flow_id,
+                           "--reuse-current")
+
+    def commit_in(self, worktree, name):
+        (worktree / name).write_text("change\n")
+        git(worktree, "add", name)
+        git(worktree, "commit", "-qm", f"add {name}")
+        return git(worktree, "rev-parse", "HEAD")
+
+    def squash_merge(self, flow_id):
+        git(self.repo, "merge", "--squash", f"af/{flow_id}")
+        git(self.repo, "commit", "-qm", f"squash {flow_id}")
+
+    def gh_reports(self, state, head):
+        self.env["FAKE_GH_JSON"] = json.dumps({"state": state, "headRefOid": head})
+
+    def remove(self, flow_id, *extra):
+        return self.run_af("worktree", "remove", "--repo", str(self.repo), "--flow-id", flow_id, *extra)
+
+    def test_reuse_current_switches_the_linked_worktree_to_the_flow_branch(self):
+        app = self.app_worktree()
+        head = git(app, "rev-parse", "HEAD")
+        created = self.reuse(app, "reuse-001")
+        self.assertEqual(created.returncode, 0, created.stderr)
+        record = json.loads(created.stdout)
+        self.assertEqual(record["path"], str(app.resolve()))
+        self.assertEqual(record["base_sha"], head)
+        self.assertTrue(record["reused"])
+        self.assertEqual(record["original_branch"], "claude/app")
+        self.assertEqual(git(app, "branch", "--show-current"), "af/reuse-001")
+        self.assertFalse((self.base / "project-reuse-001").exists())
+        self.assertFalse((self.base / "app-session-reuse-001").exists())
+
+        (self.repo / "af.config.json").write_text("{}\n")
+        started = self.run_af("state", "start", "--repo", str(app), "--flow-id", "reuse-001",
+                              "--base-sha", head, "--chain", "tdd")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        state = json.loads(Path(json.loads(started.stdout)["state_path"]).read_text())
+        self.assertTrue(state["reused"])
+        self.assertEqual(state["original_branch"], "claude/app")
+
+    def test_reuse_current_refuses_primary_checkout_and_dirty_worktrees(self):
+        primary = self.reuse(self.repo, "reuse-primary")
+        self.assertNotEqual(primary.returncode, 0)
+        self.assertIn("linked worktree", primary.stderr)
+        self.assertEqual(git(self.repo, "branch", "--list", "af/reuse-primary"), "")
+        app = self.app_worktree()
+        (app / "scratch.txt").write_text("not mine\n")
+        dirty = self.reuse(app, "reuse-dirty")
+        self.assertNotEqual(dirty.returncode, 0)
+        self.assertIn("clean", dirty.stderr)
+        self.assertEqual(git(app, "branch", "--show-current"), "claude/app")
+
+    def test_reuse_current_refuses_a_worktree_held_by_another_active_flow(self):
+        app = self.app_worktree()
+        self.assertEqual(self.reuse(app, "reuse-a").returncode, 0)
+        (self.repo / "af.config.json").write_text("{}\n")
+        started = self.run_af("state", "start", "--repo", str(app), "--flow-id", "reuse-a",
+                              "--base-sha", git(app, "rev-parse", "HEAD"), "--chain", "tdd")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        on_flow = self.reuse(app, "reuse-b")
+        self.assertNotEqual(on_flow.returncode, 0)
+        self.assertIn("active flow", on_flow.stderr)
+        git(app, "switch", "-q", "claude/app")
+        switched_away = self.reuse(app, "reuse-b")
+        self.assertNotEqual(switched_away.returncode, 0)
+        self.assertIn("active flow reuse-a", switched_away.stderr)
+
+    def test_remove_accepts_squash_merged_pull_request_with_matching_head(self):
+        created = self.run_af("worktree", "create", "--repo", str(self.repo), "--flow-id", "squash")
+        worktree = Path(json.loads(created.stdout)["path"])
+        head = self.commit_in(worktree, "feature.txt")
+        self.squash_merge("squash")
+        self.gh_reports("MERGED", head)
+        removed = self.remove("squash")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertFalse(worktree.exists())
+        self.assertEqual(git(self.repo, "branch", "--list", "af/squash"), "")
+        self.assertIn("pr view af/squash --json state,headRefOid", self.gh_log.read_text())
+
+    def test_remove_fails_closed_unless_github_proves_the_same_head_merged(self):
+        created = self.run_af("worktree", "create", "--repo", str(self.repo), "--flow-id", "unproven")
+        worktree = Path(json.loads(created.stdout)["path"])
+        head = self.commit_in(worktree, "feature.txt")
+        self.squash_merge("unproven")
+        cases = [("OPEN", head, 0), ("MERGED", "0" * 40, 0), ("MERGED", head, 1)]
+        for state, reported, status in cases:
+            with self.subTest(state=state, reported=reported, status=status):
+                self.gh_reports(state, reported)
+                self.env["FAKE_GH_EXIT"] = str(status)
+                removed = self.remove("unproven")
+                self.assertNotEqual(removed.returncode, 0)
+                self.assertIn("not merged", removed.stderr)
+                self.assertTrue(worktree.exists())
+        (self.bin / "gh").unlink()
+        tools = self.base / "no-gh"
+        tools.mkdir()
+        for name in ("bash", "python3", "git", "dirname", "env"):
+            (tools / name).symlink_to(shutil.which(name))
+        self.env["PATH"] = str(tools)
+        missing = self.remove("unproven")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("not merged", missing.stderr)
+        self.assertTrue(worktree.exists())
+
+    def test_remove_reused_flow_keeps_the_worktree_and_restores_its_branch(self):
+        app = self.app_worktree()
+        self.assertEqual(self.reuse(app, "reuse-done").returncode, 0)
+        head = self.commit_in(app, "feature.txt")
+        self.squash_merge("reuse-done")
+        self.gh_reports("MERGED", head)
+        removed = self.remove("reuse-done")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(app.is_dir())
+        self.assertIn(str(app.resolve()), git(self.repo, "worktree", "list"))
+        self.assertEqual(git(app, "branch", "--show-current"), "claude/app")
+        self.assertEqual(git(self.repo, "branch", "--list", "af/reuse-done"), "")
+
+    def test_force_remove_of_reused_flow_never_discards_worktree_changes(self):
+        app = self.app_worktree()
+        self.assertEqual(self.reuse(app, "reuse-dirty").returncode, 0)
+        (app / "work.txt").write_text("unsaved\n")
+        removed = self.remove("reuse-dirty", "--force")
+        self.assertNotEqual(removed.returncode, 0)
+        self.assertTrue((app / "work.txt").is_file())
+        self.assertEqual(git(app, "branch", "--show-current"), "af/reuse-dirty")
+
+    def start_sibling(self, flow_id):
+        created = self.run_af("worktree", "create", "--repo", str(self.repo), "--flow-id", flow_id)
+        worktree = Path(json.loads(created.stdout)["path"])
+        (self.repo / "af.config.json").write_text("{}\n")
+        started = self.run_af("state", "start", "--repo", str(worktree), "--flow-id", flow_id,
+                              "--base-sha", self.checkout_sha, "--chain", "tdd")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        return worktree, Path(json.loads(started.stdout)["state_path"])
+
+    def test_remove_fails_closed_when_record_and_branch_marker_disagree_on_reuse(self):
+        worktree, state_path = self.start_sibling("lost-marker")
+        record = json.loads(state_path.read_text())
+        record.update({"reused": True, "original_branch": "claude/app"})
+        state_path.write_text(json.dumps(record))
+        removed = self.remove("lost-marker", "--force")
+        self.assertNotEqual(removed.returncode, 0)
+        self.assertIn("disagree", removed.stderr)
+        self.assertTrue(worktree.is_dir())
+        self.assertEqual(git(worktree, "branch", "--show-current"), "af/lost-marker")
+
+        record.pop("reused"); record.pop("original_branch")
+        state_path.write_text(json.dumps(record))
+        git(self.repo, "config", "branch.af/lost-marker.afReusedFrom", "claude/app")
+        removed = self.remove("lost-marker", "--force")
+        self.assertNotEqual(removed.returncode, 0)
+        self.assertIn("disagree", removed.stderr)
+        self.assertTrue(worktree.is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

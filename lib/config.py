@@ -1,5 +1,6 @@
 """Resolve and validate the supported af-lite config fields."""
 
+import hashlib
 import json
 import math
 import os
@@ -28,15 +29,13 @@ def validate_config_location(path):
         return path
     try:
         result = subprocess.run(["git", "-C", str(directory), "rev-parse", "--path-format=absolute",
-                                 "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD"],
+                                 "--abbrev-ref", "HEAD"],
                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except FileNotFoundError as exc:
         raise RuntimeError(f"cannot validate config location without git: {path}") from exc
-    details = result.stdout.splitlines()
-    if result.returncode == 0 and len(details) == 3:
-        git_dir, common, branch = details
-        if branch.startswith("af/") and Path(git_dir).resolve() != Path(common).resolve():
-            raise RuntimeError(f"config path is inside linked worktree on af/* branch: {path}")
+    # Any worktree on af/*, primary included, is writer-reachable, so its config is untrusted.
+    if result.returncode == 0 and result.stdout.strip().startswith("af/"):
+        raise RuntimeError(f"config path is inside a worktree on af/* branch: {path}")
     return path
 
 def global_config_path(env):
@@ -131,6 +130,20 @@ def load_config(explicit=None, cwd=None, env=None, require=True):
         # Git ignore lets the last matching pattern decide, so dedupe keeps the last occurrence.
         config["high_risk_paths"] = list(dict.fromkeys(reversed(combined)))[::-1]
     return config, path
+
+def config_digest(config):
+    # Hash the merged result so inherited global roles and high_risk_paths are covered too.
+    return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+
+def load_recorded_config(record, cwd):
+    if not record.get("config_path"):
+        raise RuntimeError(f"flow {record.get('flow_id')} has no recorded config path")
+    config, path = load_config(record["config_path"], cwd=cwd)
+    expected = record.get("config_sha256")
+    # Records written before config hashing carry no digest and keep loading as before.
+    if expected is not None and config_digest(config) != expected:
+        raise RuntimeError(f"config changed since flow start: {path}")
+    return config
 
 def require_object(value, name, allowed=None):
     if not isinstance(value, dict) or allowed is not None and set(value) - allowed:

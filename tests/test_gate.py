@@ -77,6 +77,16 @@ class GateCommandTests(unittest.TestCase):
         self.assertEqual(started.returncode, 0, started.stderr)
         return worktree
 
+    def test_commit_fails_closed_when_recorded_config_changes(self):
+        worktree = self.create_flow("gate-config-change")
+        self.config.write_text(json.dumps({"auto_merge": True, "high_risk_paths": []}))
+        (worktree / "change.txt").write_text("change\n")
+        committed = self.run_af("gate", "commit", "--repo", worktree, "--flow-id", "gate-config-change",
+                                "--message", "change", "--paths", "change.txt")
+        self.assertNotEqual(committed.returncode, 0)
+        self.assertIn("config changed since flow start", committed.stderr)
+        self.assertEqual(git(worktree, "rev-list", "--count", "HEAD"), git(self.repo, "rev-list", "--count", "HEAD"))
+
     def test_runs_the_configured_focused_and_full_test_commands(self):
         worktree = self.create_flow("gate-tests")
         for suite in ("focused", "full"):
@@ -262,10 +272,10 @@ class GateCommandTests(unittest.TestCase):
         template = self.base / "git-template"
         template.mkdir()
         (self.home / ".gitconfig").write_text(f"[init]\n\ttemplateDir = {template}\n")
+        self.config.write_text(json.dumps({"auto_merge": True, "high_risk_paths": ["config/secrets"]}))
         worktree = self.create_flow("gate-template")
         (worktree / "config" / "secrets").mkdir(parents=True)
         (worktree / "config" / "secrets" / "token.json").write_text("fixture\n")
-        self.config.write_text(json.dumps({"auto_merge": True, "high_risk_paths": ["config/secrets"]}))
 
         committed = self.run_af("gate", "commit", "--repo", worktree, "--flow-id", "gate-template",
                                 "--message", "commit high-risk fixture", "--paths", "config/secrets/token.json")
@@ -279,10 +289,10 @@ class GateCommandTests(unittest.TestCase):
         self.assertEqual(decision["high_risk_paths"], ["config/secrets/token.json"])
 
     def test_high_risk_paths_remain_visible_after_host_commit(self):
+        self.config.write_text(json.dumps({"auto_merge": True, "high_risk_paths": ["payments/**"]}))
         worktree = self.create_flow("gate-risk")
         (worktree / "payments").mkdir()
         (worktree / "payments" / "api.py").write_text("value = 1\n")
-        self.config.write_text(json.dumps({"auto_merge": True, "high_risk_paths": ["payments/**"]}))
         committed = self.run_af("gate", "commit", "--repo", str(worktree), "--flow-id", "gate-risk",
                                 "--message", "commit high-risk fixture", "--paths", "payments/api.py")
         self.assertEqual(committed.returncode, 0, committed.stderr)
@@ -326,10 +336,10 @@ class GateCommandTests(unittest.TestCase):
         self.assertEqual(json.loads(merged.stdout)["decision"], "merge")
 
     def test_decide_with_flow_id_reads_committed_changes_from_flow_branch(self):
+        self.config.write_text(json.dumps({"auto_merge": True, "high_risk_paths": ["src/auth"]}))
         worktree = self.create_flow("gate-flow-head")
         status = self.run_af("state", "status", "--repo", str(self.repo), "--flow-id", "gate-flow-head")
         self.assertEqual(json.loads(status.stdout)["worktree_path"], str(worktree))
-        self.config.write_text(json.dumps({"auto_merge": True, "high_risk_paths": ["src/auth"]}))
         target = worktree / "src" / "auth" / "token.py"
         target.parent.mkdir(parents=True)
         target.write_text("value = 1\n")
@@ -344,9 +354,10 @@ class GateCommandTests(unittest.TestCase):
         self.assertEqual(result["high_risk_paths"], ["src/auth/token.py"])
 
     def test_high_risk_paths_follow_git_check_ignore_for_slash_patterns(self):
-        worktree = self.create_flow("gate-patterns")
         patterns = ["src/auth", "src/auth/", "db/*", "config/secrets", "a/**/b",
                     "**/secrets", "/db/*.sql", "ignored/"]
+        self.config.write_text(json.dumps({"auto_merge": True, "high_risk_paths": patterns}))
+        worktree = self.create_flow("gate-patterns")
         paths = ["src/auth/token.py", "db/migrations/1.sql", "config/secrets/client.json",
                  "a/x/b/file.txt", "nested/secrets/key.txt", "db/direct.sql", "nested/db/direct.sql",
                  "ignored/secret.txt"]
@@ -365,7 +376,6 @@ class GateCommandTests(unittest.TestCase):
             input=("\0".join(tracked_paths) + "\0").encode(), stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=True).stdout.decode().split("\0")
         expected = sorted(path for path in expected if path)
-        self.config.write_text(json.dumps({"auto_merge": True, "high_risk_paths": patterns}))
         decision = self.run_af("gate", "decide", "--repo", worktree, "--flow-id", "gate-patterns",
                                "--tests", "pass", "--reviews", "pass")
         self.assertEqual(decision.returncode, 0, decision.stderr)

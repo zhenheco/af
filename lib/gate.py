@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tempfile
 
-from config import load_config
+from config import load_recorded_config
 from state import add_flow_args, read_record, state_path
 from worktree import common_dir, git, repository_root
 
@@ -174,11 +174,12 @@ def emit(result, status=0):
 def run_gate(args):
     root = repository_root(args.repo)
     if args.gate_action == "commit":
+        load_recorded_config(read_record(state_path(root, args.flow_id)), root)
         return emit(commit_paths(root, args.flow_id, args.paths, args.message))
 
     try:
         record, worktree = flow_context(root, args.flow_id)
-        config, _ = load_config(record["config_path"], cwd=root)
+        config = load_recorded_config(record, root)
     except (RuntimeError, ValueError) as exc:
         if args.gate_action == "decide":
             return emit({"decision": "blocked", "reasons": [f"cannot load required config: {exc}"]}, 2)

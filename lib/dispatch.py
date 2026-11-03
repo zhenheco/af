@@ -9,7 +9,7 @@ import re
 import signal
 import subprocess
 
-from config import load_config
+from config import load_recorded_config
 from selection import REVIEW_ROLES, choose
 from state import read_record, state_path
 from worktree import common_dir, git, validate_flow_id
@@ -169,9 +169,7 @@ def run_dispatch(args):
 
     worktree = validate_worktree(worktree_arg, args.flow_id)
     record = read_record(state_path(worktree, args.flow_id))
-    config_path = record.get("config_path")
-    if not config_path: raise RuntimeError(f"flow {args.flow_id} has no recorded config path")
-    config, _ = load_config(config_path, cwd=worktree)
+    config = load_recorded_config(record, worktree)
 
     selection = choose(args.role, config, args.writer_company)
     if not selection["selected"]:

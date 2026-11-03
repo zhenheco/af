@@ -12,7 +12,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
-from config import validate_config
+from config import config_digest, load_config, validate_config
 
 
 def git(cwd, *args):
@@ -116,6 +116,15 @@ class DispatchCommandTests(unittest.TestCase):
             "quota_stop": {"exit_statuses": [75],
                            "patterns": ["quota exceeded", "rate limit exceeded"]}, **extra}
         self.config.write_text(json.dumps(config))
+        self.repin_config()
+
+    def repin_config(self):
+        # These tests vary config per case; re-pin the started flow's digest like a fresh start would.
+        record = Path(git(self.repo, "rev-parse", "--path-format=absolute", "--git-common-dir")) / ".af/flows/dispatch-001.json"
+        if record.exists():
+            data = json.loads(record.read_text())
+            data["config_sha256"] = config_digest(load_config(str(self.config), env=self.env)[0])
+            record.write_text(json.dumps(data))
 
     def run_af(self, *args, input=None, env=None):
         return subprocess.run([str(ROOT / "bin" / "af"), *map(str, args)], env=env or self.env,
@@ -609,6 +618,7 @@ class DispatchCommandTests(unittest.TestCase):
         config = json.loads(self.config.read_text())
         del config["quota_stop"]
         self.config.write_text(json.dumps(config))
+        self.repin_config()
         result = self.dispatch()
         self.assertEqual(result.returncode, 0, result.stderr)
         attempts = json.loads(result.stdout)["attempts"]
