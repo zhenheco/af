@@ -79,8 +79,11 @@ def reuse_current(repo_arg, flow_id):
     if git(root, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}", check=False).returncode == 0:
         raise RuntimeError(f"branch already exists: {branch}")
     base_sha = git_output(root, "rev-parse", "HEAD")
-    upstream = git_output(root, "rev-parse", "--symbolic-full-name", f"{original}@{{upstream}}",
-                          check=False) if original else ""
+    # Session branches rarely track anything mergeable, so prefer origin's default branch as the merge base.
+    upstream = git_output(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD", check=False)
+    if not upstream or git(root, "show-ref", "--verify", "--quiet", upstream, check=False).returncode != 0:
+        upstream = git_output(root, "rev-parse", "--symbolic-full-name", f"{original}@{{upstream}}",
+                              check=False) if original else ""
     git(root, "switch", "-q", "-c", branch)
     git(root, "config", f"branch.{branch}.{REUSED_KEY}", original)
     if upstream:

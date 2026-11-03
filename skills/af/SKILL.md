@@ -19,7 +19,7 @@ Use af-lite to run an ordered Matt Pocock skill flow. The skills and worker CLIs
 
 2. Create a unique flow ID. Keep the returned worktree `path` and `base_sha`.
 
-   In a Claude app worktree session, or any clean linked worktree that will host a single writer, reuse it. This switches it to `af/<id>` from its current HEAD and records the original branch:
+   In a Claude app worktree session, or any clean linked worktree that will host a single writer, reuse it. This switches it to `af/<id>` from its current HEAD, records the original branch, and sets the base of `af/<id>` to origin's default branch (`refs/remotes/origin/HEAD`, else the original branch's upstream, else none):
 
    ```sh
    af worktree create --repo /path/to/current-worktree --flow-id <id> --reuse-current

@@ -249,6 +249,44 @@ class WorktreeCommandTests(unittest.TestCase):
         self.assertEqual(git(app, "branch", "--show-current"), "claude/app")
         self.assertEqual(git(self.repo, "branch", "--list", "af/reuse-done"), "")
 
+    def set_origin_head(self, name="trunk"):
+        git(self.repo, "remote", "add", "origin", "https://example.invalid/project.git")
+        git(self.repo, "update-ref", f"refs/remotes/origin/{name}", "HEAD")
+        git(self.repo, "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{name}")
+
+    def test_reuse_current_bases_the_flow_branch_on_the_origin_default_branch(self):
+        self.set_origin_head()
+        git(self.repo, "branch", "other", "HEAD")
+        app = self.app_worktree()
+        git(app, "branch", "--set-upstream-to", "other")
+        self.assertEqual(self.reuse(app, "reuse-base").returncode, 0)
+        self.assertEqual(git(app, "rev-parse", "--symbolic-full-name", "af/reuse-base@{upstream}"),
+                         "refs/remotes/origin/trunk")
+
+    def test_remove_reused_flow_merged_into_origin_default_branch_needs_no_force(self):
+        self.set_origin_head()
+        app = self.app_worktree()
+        self.assertEqual(self.reuse(app, "reuse-ff").returncode, 0)
+        tip = self.commit_in(app, "feature.txt")
+        git(self.repo, "update-ref", "refs/remotes/origin/trunk", tip)
+        removed = self.remove("reuse-ff")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(app.is_dir())
+        self.assertEqual(git(app, "branch", "--show-current"), "claude/app")
+        self.assertEqual(git(self.repo, "branch", "--list", "af/reuse-ff"), "")
+
+    def test_reuse_current_without_origin_head_keeps_the_original_branch_upstream(self):
+        git(self.repo, "remote", "add", "origin", "https://example.invalid/project.git")
+        git(self.repo, "branch", "other", "HEAD")
+        tracked = self.app_worktree("tracked")
+        git(tracked, "branch", "--set-upstream-to", "other")
+        self.assertEqual(self.reuse(tracked, "reuse-old").returncode, 0)
+        self.assertEqual(git(tracked, "rev-parse", "--symbolic-full-name", "af/reuse-old@{upstream}"),
+                         "refs/heads/other")
+        bare = self.app_worktree("bare")
+        self.assertEqual(self.reuse(bare, "reuse-none").returncode, 0)
+        self.assertEqual(git(bare, "for-each-ref", "--format=%(upstream)", "refs/heads/af/reuse-none"), "")
+
     def test_force_remove_of_reused_flow_never_discards_worktree_changes(self):
         app = self.app_worktree()
         self.assertEqual(self.reuse(app, "reuse-dirty").returncode, 0)
