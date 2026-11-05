@@ -70,8 +70,8 @@ class SkillCommandContractTests(unittest.TestCase):
 
     def test_cleanup_documentation_matches_supported_command(self):
         skill = (ROOT / "skills" / "af" / "SKILL.md").read_text()
-        self.assertIn("af cleanup --repo /path/to/repository", skill)
-        self.assertIn("af worktree remove --repo /path/to/repository --flow-id <id>", skill)
+        self.assertIn('af cleanup --repo "$R"', skill)
+        self.assertIn('af worktree remove --repo "$R" --flow-id <id>', skill)
 
     def test_readme_config_table_matches_supported_fields_and_example(self):
         readme = (ROOT / "README.md").read_text()

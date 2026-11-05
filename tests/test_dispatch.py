@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -8,11 +9,13 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 from config import config_digest, load_config, validate_config
+import dispatch as dispatch_module
 
 
 def git(cwd, *args):
@@ -133,6 +136,70 @@ class DispatchCommandTests(unittest.TestCase):
     def dispatch(self, prompt="implement the fixture", env=None):
         return self.run_af("dispatch", "--worktree", self.worktree, "--flow-id", "dispatch-001",
                            "--role", "writer", "--prompt", prompt, env=env)
+
+    def test_log_paths_are_unique_per_call_even_with_a_frozen_clock(self):
+        frozen = datetime(2026, 11, 4, 9, 18, 54, 398667, tzinfo=timezone.utc)
+        with mock.patch.object(dispatch_module, "datetime") as fake_datetime:
+            fake_datetime.now.return_value = frozen
+            first = dispatch_module.create_log_paths(self.worktree, "dispatch-001", "big_review", 1)
+            second = dispatch_module.create_log_paths(self.worktree, "dispatch-001", "big_review", 1)
+        self.assertNotEqual(first["stdout"], second["stdout"])
+        self.assertNotEqual(first["stderr"], second["stderr"])
+        for paths in (first, second):
+            self.assertTrue(Path(paths["stdout"]).exists())
+            self.assertTrue(Path(paths["stderr"]).exists())
+
+    def test_log_path_collision_retries_without_leaving_an_orphan(self):
+        frozen = datetime(2026, 11, 4, 9, 18, 54, 398667, tzinfo=timezone.utc)
+        folder = Path(git(self.repo, "rev-parse", "--path-format=absolute", "--git-common-dir")) / ".af/logs/dispatch-001"
+        folder.mkdir(parents=True, exist_ok=True)
+        first = folder / f"big_review-1-20261104T091854.398667Z-{os.getpid()}-aaaa0000"
+        taken = Path(f"{first}.err.log")
+        taken.write_text("someone else's log")
+        with mock.patch.object(dispatch_module, "datetime") as fake_datetime, \
+                mock.patch.object(dispatch_module.secrets, "token_hex",
+                                  side_effect=["aaaa0000", "bbbb1111"]):
+            fake_datetime.now.return_value = frozen
+            paths = dispatch_module.create_log_paths(self.worktree, "dispatch-001", "big_review", 1)
+        self.assertIn("bbbb1111", paths["stdout"])
+        self.assertIn("bbbb1111", paths["stderr"])
+        self.assertTrue(Path(paths["stdout"]).exists())
+        self.assertTrue(Path(paths["stderr"]).exists())
+        self.assertEqual(taken.read_text(), "someone else's log")
+        self.assertFalse(Path(f"{first}.out.log").exists())
+
+    def test_report_path_is_the_last_attempt_stdout(self):
+        record = json.loads(self.dispatch().stdout)
+        self.assertEqual(record["report_path"], record["attempts"][-1]["log_paths"]["stdout"])
+        self.env["FAKE_CLAUDE_MODE"] = "quota"
+        self.write_config({"writer": [
+            {"via": "claude", "model": "writer-model", "company": "Anthropic"},
+            {"via": "pi", "provider": "openai", "model": "writer", "company": "OpenAI"}]})
+        record = json.loads(self.dispatch().stdout)
+        self.assertEqual(len(record["attempts"]), 2)
+        self.assertEqual(record["report_path"], record["attempts"][-1]["log_paths"]["stdout"])
+        self.assertNotEqual(record["report_path"], record["attempts"][0]["log_paths"]["stdout"])
+
+    def test_concurrent_dispatches_for_one_flow_keep_separate_reports(self):
+        self.write_exe("pi", "#!/bin/sh\nsleep 0.5\ncat\n")
+        self.write_config({"big_review": [
+            {"via": "pi", "provider": "openai", "model": "reviewer", "company": "OpenAI"}]})
+        processes = [subprocess.Popen(
+            [str(ROOT / "bin" / "af"), "dispatch", "--worktree", str(self.worktree),
+             "--flow-id", "dispatch-001", "--role", "big_review", "--writer-company", "Anthropic", "--prompt", f"MARKER-{name}"],
+            env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for name in ("ALPHA", "BETA")]
+        records = []
+        for process in processes:
+            out, err = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 0, err)
+            records.append(json.loads(out))
+        self.assertNotEqual(records[0]["report_path"], records[1]["report_path"])
+        for record, mine, other in ((records[0], "ALPHA", "BETA"), (records[1], "BETA", "ALPHA")):
+            self.assertEqual(record["report_path"], record["attempts"][-1]["log_paths"]["stdout"])
+            text = Path(record["report_path"]).read_text()
+            self.assertIn(f"MARKER-{mine}", text)
+            self.assertNotIn(f"MARKER-{other}", text)
 
     def test_default_pi_candidate_keeps_argv_and_inherits_environment(self):
         self.env["FAKE_DEFAULT_SENTINEL"] = "visible"

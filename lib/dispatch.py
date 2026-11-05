@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import subprocess
 
@@ -39,9 +40,20 @@ def create_log_paths(root, flow_id, role, attempt):
     folder.mkdir(parents=True, exist_ok=True)
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", role).strip(".-") or "worker"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    stem = f"{name}-{attempt}-{stamp}"
-    return {"stdout": str(folder / f"{stem}.out.log"),
-            "stderr": str(folder / f"{stem}.err.log")}
+    while True:
+        stem = f"{name}-{attempt}-{stamp}-{os.getpid()}-{secrets.token_hex(4)}"
+        paths = {"stdout": folder / f"{stem}.out.log", "stderr": folder / f"{stem}.err.log"}
+        created = []
+        try:
+            # Exclusive creation: no other dispatch process can share or truncate these files.
+            for path in paths.values():
+                open(path, "x").close()
+                created.append(path)
+        except FileExistsError:
+            for path in created:  # remove only what this call created before retrying
+                path.unlink()
+            continue
+        return {key: str(path) for key, path in paths.items()}
 
 def resolve_api_key(candidate, worktree, environment, paths):
     try:
@@ -134,6 +146,8 @@ def head_and_status(worktree):
     return head, status
 
 def emit(output, status):
+    if output.get("attempts"):
+        output["report_path"] = output["attempts"][-1]["log_paths"]["stdout"]
     print(json.dumps(output, ensure_ascii=False))
     return status
 
