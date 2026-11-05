@@ -77,7 +77,7 @@ Run focused tests after each writer step:
 af gate test --repo "$W" --flow-id <id> --suite focused
 ```
 
-Shared local services: a separate worktree does not isolate external resources. Concurrent `af gate test` runs from different worktrees collided on one shared local Postgres (global schemas). Take a lock around every gate test that touches the shared service, in every worktree. A check-then-start (`pgrep`, then run) is racy, since two flows can both see nothing running. The subshell scopes the trap, releases the lock on success, failure, and INT/TERM/HUP, and returns the gate test's exit status (works in bash and zsh, with or without `set -e`; after `kill -9`, remove the stale lock directory by hand; `flock` is an alternative where installed):
+Shared local services: a separate worktree does not isolate external resources. Concurrent `af gate test` runs from different worktrees collided on one shared local Postgres (global schemas). Take a lock around every gate test that touches the shared service, in every worktree. A check-then-start (`pgrep`, then run) is racy, since two flows can both see nothing running. The subshell scopes the trap, releases the lock on success, failure, and INT/TERM/HUP, and, as the block's last command, leaves the gate test's exit status as the block's status (works in bash and zsh, with or without `set -e`; after `kill -9`, remove the stale lock directory by hand; `flock` is an alternative where installed):
 
 ```sh
 (
@@ -90,7 +90,6 @@ Shared local services: a separate worktree does not isolate external resources. 
   af gate test --repo "$W" --flow-id <id> --suite full || s=$?
   exit "$s"
 )
-echo "gate test status: $?"
 ```
 
 Runs started outside af (a bare `scripts/ci.sh`) do not take the lock, so the `pgrep` loop inside the lock waits for them too; adapt its pattern to the project's CI command. The `[s]` and `[p]` brackets keep `pgrep -f` from matching the shell whose command line contains the script text.
@@ -138,12 +137,12 @@ Parallel reviews: in af-lite versions after e62b82f, each attempt gets its own l
 ```sh
 af dispatch --worktree "$W" --flow-id <id> --role <review-role> --writer-company <writer-company> --prompt "$(cat "$S/review-standards.md")" > "$S/review-1.json" & p1=$!
 af dispatch --worktree "$W" --flow-id <id> --role <review-role> --writer-company <writer-company> --prompt "$(cat "$S/review-behavior.md")" > "$S/review-2.json" & p2=$!
-wait "$p1"; s1=$?
-wait "$p2"; s2=$?
+s1=0; wait "$p1" || s1=$?
+s2=0; wait "$p2" || s2=$?
 echo "review statuses: $s1 $s2"
 ```
 
-A bare `wait` returns 0 and hides a failed review, so check each status before reading its report: 0 ok, 75 `waiting_for_quota` (wait `retry_after_minutes`, redispatch that review), 124 timeout, anything else a failure (read the JSON and its `.err.log`, then redispatch).
+A bare `wait` returns 0 and hides a failed review, and a bare `wait "$p1"; s1=$?` exits under `set -e` on a failure before `s1=$?` runs (hence `|| s1=$?`). Check each status before reading its report: 0 ok, 75 `waiting_for_quota` (wait `retry_after_minutes`, redispatch that review), 124 timeout, anything else a failure (read the JSON and its `.err.log`, then redispatch).
 
 Older af-lite (e62b82f and before) gave two simultaneous dispatches the same log path and their reports interleaved: on those versions, or when unsure of the version, run reviews one after another. A review never runs alongside a writer dispatch (Step 2).
 
@@ -156,8 +155,8 @@ Collect the findings and fix them in one writer run. An ordinary repair round ne
 Changes matching configured high-risk paths need two reviews on every round and the full suite. Loop until both reviews return no blocking findings, one writer per round:
 
 1. Collect every finding from both reviews into ONE writer brief and dispatch one writer (Step 2). Writer fixes test-first.
-2. Run the full gate (`--suite full`) on every round, not only focused.
-3. Commit with `af gate commit` (Step 3).
+2. Run focused tests, then commit with `af gate commit` (Step 3).
+3. Run the full gate (`--suite full`) on the committed SHA, every round, and record that SHA.
 4. Dispatch the two reviews (Step 4) against the exact new diff range. The review prompt names `<prev-reviewed-sha>..HEAD` for the repair plus `base_sha...HEAD` for context, lists the findings being fixed, and asks for each "Fixed at the root cause? Does the new test fail without the fix?" plus "any new defect in this diff?". Example saved in `$S/round-N-review.md`:
 
    ```text
@@ -168,7 +167,7 @@ Changes matching configured high-risk paths need two reviews on every round and 
    Also: any new defect in this diff?
    ```
 
-5. Log the round (round number, findings, commit SHA, full-suite pass on that SHA) in `$S/rounds.md`, so later rounds do not reopen settled items.
+5. Log the round (round number, findings, commit SHA with its full-suite result) in `$S/rounds.md`, so later rounds do not reopen settled items.
 
 Before the gate decision, review any final repair diff.
 
@@ -176,7 +175,7 @@ Done when both reviews of the latest round return no blocking findings and the r
 
 ## 6. Decide, PR, merge
 
-The full suite must pass on the HEAD you decide on. A passing full-suite run on that same HEAD (for example the last high-risk round, noted by SHA in `$S/rounds.md`) is reused; run it again only when HEAD moved:
+The full suite must pass on the HEAD you decide on. A passing full-suite run on that same HEAD (for example the last high-risk round's committed SHA in `$S/rounds.md`) is reused; run it again only when HEAD differs from that SHA:
 
 ```sh
 af gate test --repo "$W" --flow-id <id> --suite full
