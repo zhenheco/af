@@ -28,6 +28,7 @@
   "skill_dirs": ["~/.claude/skills", "~/.agents/skills", "./skills"],
   "auto_merge": true,
   "high_risk_paths": [],
+  "owner_approval_paths": [],
   "tests": {
     "focused": "<your focused test command>",
     "full": "<your full test command>"

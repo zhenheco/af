@@ -322,6 +322,413 @@ class GateCommandTests(unittest.TestCase):
         (worktree / "untracked.txt").write_text("untracked\n")
         decide()
 
+    def commit_file(self, worktree, flow_id, relative, text="value = 1\n"):
+        path = worktree / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        committed = self.run_af("gate", "commit", "--repo", worktree, "--flow-id", flow_id,
+                                "--message", f"add {relative}", "--paths", relative)
+        self.assertEqual(committed.returncode, 0, committed.stderr)
+
+    def decide(self, worktree, flow_id, tests="pass", reviews="pass"):
+        result = self.run_af("gate", "decide", "--repo", worktree, "--flow-id", flow_id,
+                             "--tests", tests, "--reviews", reviews)
+        return result, json.loads(result.stdout)
+
+    def write_gate_config(self, **extra):
+        self.config.write_text(json.dumps({"tests": {"focused": "fake-test focused", "full": "fake-test full"},
+                                           "auto_merge": True, "high_risk_paths": [], **extra}))
+
+    def test_payment_diff_needs_the_owner_and_exits_three(self):
+        self.write_gate_config(owner_approval_paths=["payments/", "*stripe*"])
+        worktree = self.create_flow("gate-owner")
+        self.commit_file(worktree, "gate-owner", "src/stripe_client.py")
+        self.commit_file(worktree, "gate-owner", "docs/notes.md")
+
+        result, report = self.decide(worktree, "gate-owner")
+
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(report["decision"], "owner")
+        self.assertEqual(report["owner_approval_paths"], ["src/stripe_client.py"])
+        self.assertEqual(report["high_risk_paths"], [])
+        self.assertEqual(report["reasons"], ["payment paths need the owner's approval before merging"])
+
+    def test_owner_outranks_ask_and_blocked_outranks_owner(self):
+        self.write_gate_config(owner_approval_paths=["payments/"], high_risk_paths=["payments/"],
+                               auto_merge=False)
+        worktree = self.create_flow("gate-owner-rank")
+        self.commit_file(worktree, "gate-owner-rank", "payments/api.py")
+
+        result, report = self.decide(worktree, "gate-owner-rank")
+        self.assertEqual((result.returncode, report["decision"]), (3, "owner"))
+        self.assertEqual(report["high_risk_paths"], ["payments/api.py"])
+        self.assertEqual(report["owner_approval_paths"], ["payments/api.py"])
+
+        for tests, reviews in (("fail", "pass"), ("pass", "pending")):
+            result, report = self.decide(worktree, "gate-owner-rank", tests, reviews)
+            self.assertEqual((result.returncode, report["decision"]), (2, "blocked"))
+            self.assertEqual(report["owner_approval_paths"], ["payments/api.py"])
+
+    def test_decide_without_payment_paths_reports_an_empty_owner_list(self):
+        self.write_gate_config(owner_approval_paths=["payments/"])
+        worktree = self.create_flow("gate-owner-none")
+        self.commit_file(worktree, "gate-owner-none", "docs/notes.md")
+
+        result, report = self.decide(worktree, "gate-owner-none")
+
+        self.assertEqual((result.returncode, report["decision"]), (0, "merge"))
+        self.assertEqual(report["owner_approval_paths"], [])
+
+
+    def add_origin(self, set_head=True):
+        origin = self.base / "origin.git"
+        git(self.base, "init", "-q", "--bare", str(origin))
+        git(self.repo, "remote", "add", "origin", str(origin))
+        branch = git(self.repo, "branch", "--show-current")
+        git(self.repo, "push", "-q", "origin", branch)
+        git(self.repo, "fetch", "-q", "origin")
+        if set_head:
+            git(self.repo, "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{branch}")
+        return origin
+
+    def test_decide_blocks_a_base_that_is_not_on_origins_default_branch(self):
+        self.add_origin()
+        (self.repo / "local.txt").write_text("unpushed\n")
+        git(self.repo, "add", "local.txt")
+        git(self.repo, "commit", "-qm", "unpushed local commit")
+        worktree = self.create_flow("gate-base-off-origin")
+
+        result, report = self.decide(worktree, "gate-base-off-origin")
+
+        self.assertEqual((result.returncode, report["decision"]), (2, "blocked"))
+        self.assertEqual(report["reasons"], [
+            "base_sha is not on origin's default branch: the PR would carry unpushed commits; "
+            "run git fetch origin or start the flow from origin's default branch"])
+
+    def test_decide_accepts_a_base_on_origin_and_skips_the_check_without_origin_head(self):
+        self.add_origin()
+        worktree = self.create_flow("gate-base-on-origin")
+        self.commit_file(worktree, "gate-base-on-origin", "docs/notes.md")
+        result, report = self.decide(worktree, "gate-base-on-origin")
+        self.assertEqual((result.returncode, report["decision"]), (0, "merge"))
+
+        git(self.repo, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+        (self.repo / "local.txt").write_text("unpushed\n")
+        git(self.repo, "add", "local.txt")
+        git(self.repo, "commit", "-qm", "unpushed local commit")
+        unchecked = self.create_flow("gate-no-origin-head")
+        result, report = self.decide(unchecked, "gate-no-origin-head")
+        self.assertEqual((result.returncode, report["decision"]), (0, "merge"))
+
+    def install_gh(self):
+        """Fake gh that logs every call and answers each subcommand from FAKE_GH_<SUB>_{OUT,ERR,EXIT}."""
+        self.gh_log = self.base / "gh-calls"
+        gh = self.bin / "gh"
+        gh.write_text("#!/bin/sh\n"
+                      "printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n"
+                      "case \"$1 $2\" in\n"
+                      "  'pr view') out=$FAKE_GH_VIEW_OUT err=$FAKE_GH_VIEW_ERR code=${FAKE_GH_VIEW_EXIT:-0}\n"
+                      "    case \"$*\" in *' --json state') out=$FAKE_GH_STATE_OUT code=${FAKE_GH_STATE_EXIT:-0};; esac;;\n"
+                      "  'api graphql') out=$FAKE_GH_GRAPHQL_OUT err=$FAKE_GH_GRAPHQL_ERR code=${FAKE_GH_GRAPHQL_EXIT:-0};;\n"
+                      "  'api repos/{owner}/{repo}/branches/'*) out=$FAKE_GH_BRANCH_OUT err=$FAKE_GH_BRANCH_ERR code=${FAKE_GH_BRANCH_EXIT:-0};;\n"
+                      "  'api repos/{owner}/{repo}/rules/branches/'*) out=$FAKE_GH_RULES_OUT err=$FAKE_GH_RULES_ERR code=${FAKE_GH_RULES_EXIT:-0};;\n"
+                      "  'pr merge') out=$FAKE_GH_MERGE_OUT err=$FAKE_GH_MERGE_ERR code=${FAKE_GH_MERGE_EXIT:-0};;\n"
+                      "  *) echo \"unexpected gh call: $*\" >&2; exit 99;;\n"
+                      "esac\n"
+                      "printf '%s' \"$out\"; printf '%s' \"$err\" >&2; exit \"$code\"\n")
+        gh.chmod(0o755)
+        self.env["GH_LOG"] = str(self.gh_log)
+        self.env["FAKE_GH_STATE_OUT"] = json.dumps({"state": "MERGED"})
+        self.required_checks()
+
+    def required_checks(self, contexts=(), rules=()):
+        """Script the base branch protection (contexts) and repository rules (rule contexts) the fake gh reports."""
+        protection = {"enabled": bool(contexts), "required_status_checks": {
+            "contexts": list(contexts), "checks": [{"context": name, "app_id": None} for name in contexts],
+            "enforcement_level": "non_admins"}} if contexts else {"enabled": False}
+        self.env["FAKE_GH_BRANCH_OUT"] = json.dumps({"name": "main", "protection": protection})
+        # gh api --paginate --slurp wraps the pages in one outer array.
+        self.env["FAKE_GH_RULES_OUT"] = json.dumps([
+            [{"type": "required_status_checks",
+              "parameters": {"required_status_checks": [{"context": name} for name in rules]}}] if rules else []])
+
+    def gh_calls(self):
+        return self.gh_log.read_text().splitlines() if self.gh_log.exists() else []
+
+    def gh_pr(self, tip, rollup=None, **extra):
+        view = {"id": "PR_node1", "number": 7, "url": "https://example.invalid/o/r/pull/7", "state": "OPEN",
+                "headRefOid": tip, "baseRefName": "main", "statusCheckRollup": [] if rollup is None else rollup, **extra}
+        self.env["FAKE_GH_VIEW_OUT"] = json.dumps(view)
+
+    def merge_flow(self, flow_id, path="docs/notes.md"):
+        worktree = self.create_flow(flow_id)
+        self.commit_file(worktree, flow_id, path)
+        self.install_gh()
+        tip = git(worktree, "rev-parse", f"refs/heads/af/{flow_id}")
+        self.gh_pr(tip)
+        return worktree, tip
+
+    def gate_merge(self, worktree, flow_id, *extra, tests="pass", reviews="pass"):
+        result = self.run_af("gate", "merge", "--repo", worktree, "--flow-id", flow_id,
+                             "--tests", tests, "--reviews", reviews, *extra)
+        return result, json.loads(result.stdout)
+
+    def test_merge_stops_without_calling_gh_when_blocked_or_owner_approval_is_missing(self):
+        self.write_gate_config(owner_approval_paths=["payments/"])
+        worktree, _ = self.merge_flow("gate-merge-stop", path="payments/api.py")
+
+        result, report = self.gate_merge(worktree, "gate-merge-stop", tests="fail")
+        self.assertEqual((result.returncode, report["decision"]), (2, "blocked"))
+        result, report = self.gate_merge(worktree, "gate-merge-stop")
+        self.assertEqual((result.returncode, report["decision"]), (3, "owner"))
+        self.assertEqual(report["owner_approval_paths"], ["payments/api.py"])
+        result, report = self.gate_merge(worktree, "gate-merge-stop", "--owner-approved", tests="fail")
+        self.assertEqual((result.returncode, report["decision"]), (2, "blocked"))
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_merge_with_owner_approval_merges_a_payment_diff(self):
+        self.write_gate_config(owner_approval_paths=["payments/"])
+        worktree, tip = self.merge_flow("gate-merge-owner-ok", path="payments/api.py")
+
+        result, report = self.gate_merge(worktree, "gate-merge-owner-ok", "--owner-approved")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((report["decision"], report["merge"]), ("owner", "merged"))
+        self.assertEqual(self.gh_calls()[-2], f"pr merge 7 --squash --match-head-commit {tip}")
+
+    def test_merge_treats_ask_as_approved_and_reports_pr_details(self):
+        self.write_gate_config(high_risk_paths=["docs/"], auto_merge=False)
+        worktree, tip = self.merge_flow("gate-merge-ask")
+
+        result, report = self.gate_merge(worktree, "gate-merge-ask")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((report["decision"], report["merge"]), ("ask", "merged"))
+        self.assertEqual(report["high_risk_paths"], ["docs/notes.md"])
+        self.assertEqual(report["owner_approval_paths"], [])
+        self.assertEqual((report["pr"], report["url"]), (7, "https://example.invalid/o/r/pull/7"))
+        self.assertEqual(self.gh_calls(), [
+            "pr view af/gate-merge-ask --json id,number,url,state,headRefOid,baseRefName,statusCheckRollup",
+            f"pr merge 7 --squash --match-head-commit {tip}",
+            "pr view af/gate-merge-ask --json state"])
+
+    def test_merge_requires_an_open_pr_at_the_tested_tip(self):
+        worktree, tip = self.merge_flow("gate-merge-pr")
+        cases = [
+            ("failed query", {"FAKE_GH_VIEW_EXIT": "1", "FAKE_GH_VIEW_OUT": ""}),
+            ("bad json", {"FAKE_GH_VIEW_OUT": "not json"}),
+            ("merged", None),
+            ("moved tip", None),
+        ]
+        for label, overrides in cases:
+            with self.subTest(label):
+                self.env.pop("FAKE_GH_VIEW_EXIT", None)
+                self.gh_pr(tip)
+                if label == "merged": self.gh_pr(tip, state="MERGED")
+                if label == "moved tip": self.gh_pr("0" * 40)
+                self.env.update(overrides or {})
+                result, report = self.gate_merge(worktree, "gate-merge-pr")
+                self.assertEqual((result.returncode, report["decision"]), (2, "blocked"))
+                self.assertIn("push the tested tip and open the PR", report["reasons"][0])
+        self.assertTrue(all(call.startswith("pr view") for call in self.gh_calls()))
+
+        self.env.pop("FAKE_GH_VIEW_EXIT", None)
+        (self.bin / "gh").unlink()
+        tools = self.base / "no-gh"
+        tools.mkdir()
+        for name in ("bash", "python3", "git", "dirname", "env", "sh"):
+            (tools / name).symlink_to(shutil.which(name))
+        self.env["PATH"] = str(tools)
+        result, report = self.gate_merge(worktree, "gate-merge-pr")
+        self.assertEqual((result.returncode, report["decision"]), (2, "blocked"))
+
+    def test_merge_is_blocked_while_ci_is_failing(self):
+        worktree, tip = self.merge_flow("gate-merge-ci-fail")
+        failing = [
+            [{"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "SUCCESS"},
+             {"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "TIMED_OUT"}],
+            [{"__typename": "StatusContext", "context": "ci/legacy", "state": "ERROR"},
+             {"__typename": "CheckRun", "name": "slow", "status": "IN_PROGRESS", "conclusion": ""}],
+        ]
+        for rollup, names in zip(failing, ("lint", "ci/legacy")):
+            with self.subTest(names):
+                self.gh_pr(tip, rollup)
+                result, report = self.gate_merge(worktree, "gate-merge-ci-fail")
+                self.assertEqual((result.returncode, report["decision"]), (2, "blocked"))
+                self.assertEqual(report["reasons"], [f"CI is failing: {names}"])
+        self.assertTrue(all(call.startswith("pr view") for call in self.gh_calls()))
+
+    def test_merge_enables_auto_merge_while_checks_are_pending(self):
+        worktree, tip = self.merge_flow("gate-merge-pending")
+        pending = [
+            [{"__typename": "CheckRun", "name": "unit", "status": "QUEUED", "conclusion": ""}],
+            [{"__typename": "StatusContext", "context": "ci/legacy", "state": "EXPECTED"}],
+            [{"__typename": "CheckRun", "name": "a", "status": "COMPLETED", "conclusion": "SUCCESS"},
+             {"__typename": "CheckRun", "name": "b", "status": "IN_PROGRESS", "conclusion": ""}],
+        ]
+        for rollup in pending:
+            with self.subTest(rollup=rollup):
+                self.gh_log.unlink(missing_ok=True)
+                self.gh_pr(tip, rollup)
+                self.required_checks(contexts=["unit", "ci/legacy"], rules=["b"])
+                result, report = self.gate_merge(worktree, "gate-merge-pending")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(report["merge"], "auto")
+                calls = self.gh_calls()
+                self.assertEqual([call.split(" ")[0:2] for call in calls],
+                                 [["pr", "view"], ["api", "repos/{owner}/{repo}/branches/main"],
+                                  ["api", "repos/{owner}/{repo}/rules/branches/main"], ["api", "graphql"]])
+                for expected in ("enablePullRequestAutoMerge", "mergeMethod: SQUASH", "expectedHeadOid",
+                                 "id=PR_node1", f"oid={tip}"):
+                    self.assertIn(expected, calls[-1])
+
+    def test_merge_waits_when_a_pending_check_is_not_required(self):
+        worktree, tip = self.merge_flow("gate-merge-unrequired")
+        self.gh_pr(tip, [{"__typename": "CheckRun", "name": "unit", "status": "QUEUED", "conclusion": ""},
+                         {"__typename": "CheckRun", "name": "e2e", "status": "IN_PROGRESS", "conclusion": ""},
+                         {"__typename": "StatusContext", "context": "ci/legacy", "state": "PENDING"}])
+        self.required_checks(contexts=["unit"])
+
+        result, report = self.gate_merge(worktree, "gate-merge-unrequired")
+
+        self.assertEqual(result.returncode, 4)
+        self.assertEqual(report["merge"], "waiting_for_ci")
+        self.assertEqual(report["reasons"], ["GitHub auto-merge would not wait for these non-required checks: "
+                                             "e2e, ci/legacy"])
+        self.assertFalse(any(call.startswith(("api graphql", "pr merge")) for call in self.gh_calls()))
+
+    def test_merge_decides_an_empty_rollup_with_workflows_by_the_required_checks(self):
+        worktree, tip = self.merge_flow("gate-merge-registering", path=".github/workflows/ci.yml")
+        self.required_checks(rules=["build"])
+        result, report = self.gate_merge(worktree, "gate-merge-registering")
+        self.assertEqual((result.returncode, report["merge"]), (0, "auto"))
+        self.assertTrue(self.gh_calls()[-1].startswith("api graphql "))
+
+        self.gh_log.unlink()
+        self.required_checks()
+        result, report = self.gate_merge(worktree, "gate-merge-registering")
+        self.assertEqual((result.returncode, report["merge"]), (4, "waiting_for_ci"))
+        self.assertEqual(report["reasons"], ["CI has not registered checks and none are required"])
+        self.assertFalse(any(call.startswith(("api graphql", "pr merge")) for call in self.gh_calls()))
+
+    def test_merge_waits_when_the_required_checks_cannot_be_read(self):
+        worktree, tip = self.merge_flow("gate-merge-api-error")
+        self.gh_pr(tip, [{"__typename": "CheckRun", "name": "unit", "status": "QUEUED", "conclusion": ""}])
+        for label, overrides in (
+                ("branch api fails", {"FAKE_GH_BRANCH_EXIT": "1", "FAKE_GH_BRANCH_ERR": "HTTP 403"}),
+                ("rules api fails", {"FAKE_GH_RULES_EXIT": "1", "FAKE_GH_RULES_ERR": "HTTP 500"}),
+                ("branch bad json", {"FAKE_GH_BRANCH_OUT": "not json"}),
+                ("branch null", {"FAKE_GH_BRANCH_OUT": "null"}),
+                ("branch not an object", {"FAKE_GH_BRANCH_OUT": "[]"}),
+                ("rules null", {"FAKE_GH_RULES_OUT": "null"}),
+                ("rules not a list", {"FAKE_GH_RULES_OUT": "{}"}),
+                ("rules page not a list", {"FAKE_GH_RULES_OUT": "[{}]"}),
+                ("protection not an object", {"FAKE_GH_BRANCH_OUT": json.dumps({"protection": [1]})}),
+                ("required_status_checks not an object",
+                 {"FAKE_GH_BRANCH_OUT": json.dumps({"protection": {"required_status_checks": [1]}})}),
+                ("contexts not strings",
+                 {"FAKE_GH_BRANCH_OUT": json.dumps({"protection": {"required_status_checks": {"contexts": ["unit", 1]}}})}),
+                ("contexts not a list",
+                 {"FAKE_GH_BRANCH_OUT": json.dumps({"protection": {"required_status_checks": {"contexts": "unit", "checks": [{"context": "unit"}]}}})}),
+                ("checks not objects",
+                 {"FAKE_GH_BRANCH_OUT": json.dumps({"protection": {"required_status_checks": {"contexts": ["unit"], "checks": [1]}}})}),
+                ("check context not a string",
+                 {"FAKE_GH_BRANCH_OUT": json.dumps(
+                     {"protection": {"required_status_checks": {"contexts": ["unit"], "checks": [{"context": 1}]}}})}),
+                ("rule not an object", {"FAKE_GH_RULES_OUT": json.dumps([[1]])}),
+                ("rule parameters not an object",
+                 {"FAKE_GH_RULES_OUT": json.dumps([[{"type": "required_status_checks", "parameters": [1]}]])}),
+                ("rule checks not a list",
+                 {"FAKE_GH_RULES_OUT": json.dumps(
+                     [[{"type": "required_status_checks", "parameters": {"required_status_checks": 1}}]])}),
+                ("rule check context missing",
+                 {"FAKE_GH_RULES_OUT": json.dumps(
+                     [[{"type": "required_status_checks", "parameters": {"required_status_checks": [{}]}}]])})):
+            with self.subTest(label):
+                self.required_checks(contexts=["unit"])
+                self.gh_log.unlink(missing_ok=True)
+                self.env.update(overrides)
+                result, report = self.gate_merge(worktree, "gate-merge-api-error")
+                self.assertEqual((result.returncode, report["merge"]), (4, "waiting_for_ci"))
+                self.assertTrue(report["reasons"][0])
+                self.assertFalse(any(call.startswith(("api graphql", "pr merge")) for call in self.gh_calls()))
+            for name in overrides: self.env.pop(name)
+
+    def test_merge_reads_every_page_of_the_branch_rules(self):
+        worktree, tip = self.merge_flow("gate-merge-pages")
+        self.gh_pr(tip, [{"__typename": "CheckRun", "name": "unit", "status": "QUEUED", "conclusion": ""}])
+        self.required_checks()
+        other = {"type": "pull_request", "parameters": {}}
+        late = {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "unit"}]}}
+        self.env["FAKE_GH_RULES_OUT"] = json.dumps([[other] * 30, [late]])
+
+        result, report = self.gate_merge(worktree, "gate-merge-pages")
+
+        self.assertEqual((result.returncode, report["merge"]), (0, "auto"))
+        rules_call = next(call for call in self.gh_calls() if "/rules/branches/" in call)
+        self.assertIn("--paginate --slurp", rules_call)
+
+    def test_merge_waits_when_a_pending_check_shares_a_name_with_another_check(self):
+        worktree, tip = self.merge_flow("gate-merge-twin")
+        self.gh_pr(tip, [{"__typename": "CheckRun", "name": "unit", "status": "QUEUED", "conclusion": ""},
+                         {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                         {"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": ""}])
+        self.required_checks(contexts=["unit", "build"])
+
+        result, report = self.gate_merge(worktree, "gate-merge-twin")
+
+        self.assertEqual((result.returncode, report["merge"]), (4, "waiting_for_ci"))
+        self.assertIn("build", report["reasons"][0])
+        self.assertFalse(any(call.startswith(("api graphql", "pr merge")) for call in self.gh_calls()))
+
+    def test_merge_reports_waiting_for_ci_when_auto_merge_cannot_be_enabled(self):
+        worktree, tip = self.merge_flow("gate-merge-waiting")
+        self.gh_pr(tip, [{"__typename": "CheckRun", "name": "unit", "status": "QUEUED", "conclusion": ""}])
+        self.required_checks(contexts=["unit"])
+        self.env.update(FAKE_GH_GRAPHQL_EXIT="1", FAKE_GH_GRAPHQL_ERR="Auto merge is not allowed")
+
+        result, report = self.gate_merge(worktree, "gate-merge-waiting")
+
+        self.assertEqual(result.returncode, 4)
+        self.assertEqual((report["merge"], report["reasons"]), ("waiting_for_ci", ["Auto merge is not allowed"]))
+        self.assertFalse(any(call.startswith("pr merge") for call in self.gh_calls()))
+
+    def test_merge_merges_directly_when_no_check_is_failing_or_pending(self):
+        worktree, tip = self.merge_flow("gate-merge-green")
+        green = [
+            [],
+            [{"__typename": "CheckRun", "name": "a", "status": "COMPLETED", "conclusion": "SUCCESS"},
+             {"__typename": "CheckRun", "name": "b", "status": "COMPLETED", "conclusion": "NEUTRAL"},
+             {"__typename": "CheckRun", "name": "c", "status": "COMPLETED", "conclusion": "SKIPPED"},
+             {"__typename": "StatusContext", "context": "ci/legacy", "state": "SUCCESS"}],
+        ]
+        for rollup in green:
+            with self.subTest(rollup=rollup):
+                self.gh_log.unlink(missing_ok=True)
+                self.gh_pr(tip, rollup)
+                result, report = self.gate_merge(worktree, "gate-merge-green")
+                self.assertEqual((result.returncode, report["merge"]), (0, "merged"))
+                self.assertEqual(self.gh_calls()[-2], f"pr merge 7 --squash --match-head-commit {tip}")
+
+        self.env.update(FAKE_GH_MERGE_EXIT="1", FAKE_GH_MERGE_ERR="head moved")
+        result, report = self.gate_merge(worktree, "gate-merge-green")
+        self.assertEqual((result.returncode, report["decision"]), (2, "blocked"))
+        self.assertEqual(report["reasons"], ["head moved"])
+
+    def test_merge_reports_queued_until_github_says_merged(self):
+        worktree, tip = self.merge_flow("gate-merge-queue")
+        cases = [("merge queue", {"FAKE_GH_STATE_OUT": json.dumps({"state": "OPEN"})}),
+                 ("state unreadable", {"FAKE_GH_STATE_EXIT": "1", "FAKE_GH_STATE_OUT": ""}),
+                 ("merged", {})]
+        for label, overrides in cases:
+            with self.subTest(label):
+                self.env.update(overrides)
+                result, report = self.gate_merge(worktree, "gate-merge-queue")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(report["merge"], "merged" if label == "merged" else "queued")
+            for name in overrides: self.env.pop(name)
+            self.env["FAKE_GH_STATE_OUT"] = json.dumps({"state": "MERGED"})
+
     def test_decide_returns_exit_two_for_failed_checks_and_zero_for_merge(self):
         worktree = self.create_flow("gate-exit-status")
         for tests, reviews in (("fail", "pass"), ("pass", "fail")):

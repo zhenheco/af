@@ -211,6 +211,171 @@ class WorktreeCommandTests(unittest.TestCase):
         self.assertEqual(git(self.repo, "branch", "--list", "af/squash"), "")
         self.assertIn("pr view af/squash --json state,headRefOid", self.gh_log.read_text())
 
+    def add_origin(self):
+        origin = self.base / "origin.git"
+        git(self.base, "init", "-q", "--bare", str(origin))
+        git(self.repo, "remote", "add", "origin", str(origin))
+        git(self.repo, "push", "-q", "origin", git(self.repo, "branch", "--show-current"))
+        return origin
+
+    def merged_flow_with_remote_branch(self, flow_id, push=True):
+        worktree = Path(json.loads(self.run_af("worktree", "create", "--repo", str(self.repo),
+                                               "--flow-id", flow_id).stdout)["path"])
+        head = self.commit_in(worktree, f"{flow_id}.txt")
+        if push:
+            git(worktree, "push", "-q", "origin", f"af/{flow_id}")
+        self.squash_merge(flow_id)
+        self.gh_reports("MERGED", head)
+        return worktree, head
+
+    def remote_heads(self, origin):
+        return git(origin, "for-each-ref", "--format=%(refname:short)", "refs/heads/af/")
+
+    def test_remove_deletes_the_remote_branch_when_it_sits_at_the_merged_tip(self):
+        origin = self.add_origin()
+        worktree, _ = self.merged_flow_with_remote_branch("remote-gone")
+        self.assertEqual(self.remote_heads(origin), "af/remote-gone")
+
+        removed = self.remove("remote-gone")
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(json.loads(removed.stdout)["remote_branch"], "deleted")
+        self.assertEqual(self.remote_heads(origin), "")
+        self.assertFalse(worktree.exists())
+
+    def test_remove_reports_absent_remote_branch_and_missing_remote(self):
+        origin = self.add_origin()
+        self.merged_flow_with_remote_branch("remote-absent", push=False)
+        removed = self.remove("remote-absent")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(json.loads(removed.stdout)["remote_branch"], "absent")
+
+        git(self.repo, "remote", "remove", "origin")
+        self.merged_flow_with_remote_branch("no-remote", push=False)
+        removed = self.remove("no-remote")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(json.loads(removed.stdout)["remote_branch"], "no remote")
+
+    def test_remove_keeps_a_remote_branch_at_another_sha_or_that_cannot_be_deleted(self):
+        origin = self.add_origin()
+        self.merged_flow_with_remote_branch("remote-moved", push=False)
+        git(self.repo, "push", "-q", "origin", f"{self.checkout_sha}:refs/heads/af/remote-moved")
+        removed = self.remove("remote-moved")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(json.loads(removed.stdout)["remote_branch"].startswith("kept: "))
+        self.assertEqual(git(origin, "rev-parse", "refs/heads/af/remote-moved"), self.checkout_sha)
+
+        self.merged_flow_with_remote_branch("remote-protected")
+        hook = origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho protected >&2\nexit 1\n")
+        hook.chmod(0o755)
+        removed = self.remove("remote-protected")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(json.loads(removed.stdout)["remote_branch"].startswith("kept: "))
+        self.assertIn("af/remote-protected", self.remote_heads(origin))
+
+    def test_pushed_upstream_of_its_own_branch_is_not_a_merge_proof(self):
+        origin = self.add_origin()
+        for remote in ("origin", "mirror", "custom"):
+            with self.subTest(remote=remote):
+                flow_id = f"pushed-{remote}"
+                if remote == "custom":
+                    # The tracking ref name no longer ends with the branch name.
+                    git(self.repo, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/review-*")
+                    remote = "origin"
+                elif remote != "origin":
+                    git(self.repo, "remote", "add", remote, str(origin))
+                worktree = Path(json.loads(self.run_af("worktree", "create", "--repo", str(self.repo),
+                                                       "--flow-id", flow_id).stdout)["path"])
+                head = self.commit_in(worktree, f"{flow_id}.txt")
+                git(worktree, "push", "-q", "-u", remote, f"af/{flow_id}")
+                self.gh_reports("OPEN", head)
+
+                removed = self.remove(flow_id)
+
+                self.assertNotEqual(removed.returncode, 0)
+                self.assertIn("not merged", removed.stderr)
+                self.assertTrue(worktree.exists())
+                self.assertEqual(git(self.repo, "branch", "--list", f"af/{flow_id}"), f"+ af/{flow_id}")
+                self.assertIn(f"af/{flow_id}", self.remote_heads(origin))
+
+    def test_extra_tracking_values_cannot_hide_the_own_branch_upstream(self):
+        origin = self.add_origin()
+        worktree = Path(json.loads(self.run_af("worktree", "create", "--repo", str(self.repo),
+                                               "--flow-id", "multi-track").stdout)["path"])
+        head = self.commit_in(worktree, "multi.txt")
+        git(worktree, "push", "-q", "-u", "origin", "af/multi-track")
+        # --get would return only this last value; @{upstream} uses the first.
+        git(worktree, "config", "--add", "branch.af/multi-track.merge", "refs/heads/main")
+        self.gh_reports("OPEN", head)
+
+        removed = self.remove("multi-track")
+
+        self.assertNotEqual(removed.returncode, 0)
+        self.assertIn("not merged", removed.stderr)
+        self.assertTrue(worktree.exists())
+        self.assertEqual(git(self.repo, "branch", "--list", "af/multi-track"), "+ af/multi-track")
+        self.assertIn("af/multi-track", self.remote_heads(origin))
+
+    def test_remove_keeps_a_remote_branch_that_advances_between_the_check_and_the_delete(self):
+        origin = self.add_origin()
+        worktree, head = self.merged_flow_with_remote_branch("remote-race")
+        self.commit_in(worktree, "late.txt")
+        late = git(worktree, "rev-parse", "HEAD")
+        git(worktree, "push", "-q", "origin", f"{late}:refs/heads/late-work")
+        git(worktree, "reset", "-q", "--hard", head)
+        # PATH wrapper: right after ls-remote answers, someone pushes to af/remote-race.
+        real_git = shutil.which("git")
+        (self.bin / "git").write_text(
+            "#!/bin/sh\n"
+            f"{real_git} \"$@\"; code=$?\n"
+            "for arg in \"$@\"; do [ \"$arg\" = ls-remote ] && "
+            f"{real_git} -C {origin} update-ref refs/heads/af/remote-race {late}; done\n"
+            "exit $code\n")
+        (self.bin / "git").chmod(0o755)
+
+        removed = self.remove("remote-race")
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(json.loads(removed.stdout)["remote_branch"].startswith("kept: "))
+        self.assertEqual(git(origin, "rev-parse", "refs/heads/af/remote-race"), late)
+
+    def test_remove_does_not_delete_a_tip_that_moves_after_the_merge_proof(self):
+        origin = self.add_origin()
+        worktree, head = self.merged_flow_with_remote_branch("proof-race")
+        # B has A's tree, so the worktree stays clean while the branch moves to it.
+        git(worktree, "commit", "-q", "--allow-empty", "-m", "late")
+        late = git(worktree, "rev-parse", "HEAD")
+        git(worktree, "push", "-q", "origin", f"{late}:refs/heads/late-work")
+        git(worktree, "reset", "-q", "--hard", head)
+        real_git = shutil.which("git")
+        # The fake gh proves A merged, but advances af/proof-race to B (locally and on origin) first.
+        (self.bin / "gh").write_text(
+            "#!/bin/sh\n"
+            f"{real_git} -C {self.repo} update-ref refs/heads/af/proof-race {late}\n"
+            f"{real_git} -C {origin} update-ref refs/heads/af/proof-race {late}\n"
+            f"printf '%s' '{json.dumps({'state': 'MERGED', 'headRefOid': head})}'\n")
+
+        removed = self.remove("proof-race")
+
+        self.assertNotEqual(removed.returncode, 0)
+        self.assertIn("moved after its merge was proven", removed.stderr)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/af/proof-race"), late)
+        self.assertEqual(git(origin, "rev-parse", "refs/heads/af/proof-race"), late)
+
+    def test_force_remove_never_touches_the_remote_branch(self):
+        origin = self.add_origin()
+        worktree = Path(json.loads(self.run_af("worktree", "create", "--repo", str(self.repo),
+                                               "--flow-id", "remote-force").stdout)["path"])
+        self.commit_in(worktree, "feature.txt")
+        git(worktree, "push", "-q", "origin", "af/remote-force")
+
+        removed = self.remove("remote-force", "--force")
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(json.loads(removed.stdout)["remote_branch"].startswith("kept: "))
+        self.assertEqual(self.remote_heads(origin), "af/remote-force")
+
     def test_remove_fails_closed_unless_github_proves_the_same_head_merged(self):
         created = self.run_af("worktree", "create", "--repo", str(self.repo), "--flow-id", "unproven")
         worktree = Path(json.loads(created.stdout)["path"])

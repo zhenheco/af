@@ -7,7 +7,7 @@ description: Chain Matt Pocock skills (af-lite) in a Git worktree behind test, r
 
 Use af-lite to run an ordered Matt Pocock skill flow. The skills and worker CLIs are installed separately. af-lite creates the sibling worktree or reuses the current linked worktree, records steps, selects optional `pi`, `codex`, or `claude` workers or a host handoff, runs configured tests, scans host commits, and checks the final decision.
 
-Shell variables in the commands below: `R` is the repository (or the current worktree when reusing it), `W` is the flow worktree path that `worktree create` returns, `S` is a scratch directory outside `W` (for example `S="$(mktemp -d)"`) holding dispatch output, prompt files, and the round log, because a dirty `W` blocks `gate decide` and changes dispatch's before/after comparison. Quote every path: they may contain spaces.
+Shell variables in the commands below: `R` is the repository (or the current worktree when reusing it), `P` is the primary checkout, the repository root that holds `.git` (the same as `R` unless `R` is a linked worktree), `W` is the flow worktree path that `worktree create` returns, `S` is a scratch directory outside `W` (for example `S="$(mktemp -d)"`) holding dispatch output, prompt files, and the round log, because a dirty `W` blocks `gate decide` and changes dispatch's before/after comparison. Quote every path: they may contain spaces.
 
 ## 1. Start a flow
 
@@ -17,11 +17,20 @@ Shell variables in the commands below: `R` is the repository (or the current wor
    af doctor --repo "$R"
    ```
 
-   Doctor checks the ten flow skills: `grill-with-docs`, `to-spec`, `to-tickets`, `implement-spec`, `implement`, `tdd`, `code-review`, `diagnosing-bugs`, `pr`, and `retro`. It warns if `docs/agents/issue-tracker.md` or `docs/agents/domain.md` is missing; it reports `high_risk.baseline_count`, `effective_count`, and `warnings`, setting `baseline_count` to `null` when the global baseline is invalid, `effective_count` to `null` when the project config or global baseline is invalid, and adding a warning for zero `effective_count` without changing `ok`.
+   Doctor checks the ten flow skills: `grill-with-docs`, `to-spec`, `to-tickets`, `implement-spec`, `implement`, `tdd`, `code-review`, `diagnosing-bugs`, `pr`, and `retro`. It warns if `docs/agents/issue-tracker.md` or `docs/agents/domain.md` is missing; it reports `high_risk.baseline_count`, `effective_count`, and `warnings`, setting `baseline_count` to `null` when the global baseline is invalid, `effective_count` to `null` when the project config or global baseline is invalid, and adding a warning for zero `effective_count` without changing `ok`. It reports `owner_approval.effective_count` and `warnings` the same way; an empty `owner_approval_paths` warns that payment diffs merge without the owner's approval.
 
    Done when `ok` is true and every warning is read.
 
-2. Create a unique flow ID. Keep the returned worktree `path` (this is `W`) and `base_sha`.
+2. Sweep finished flows before creating a new one:
+
+   ```sh
+   af cleanup --repo "$R" --worktrees
+   git -C "$R" fetch --prune origin
+   ```
+
+   Read the `worktrees.skipped` list in the cleanup output and report it to the owner. The sweep removes only completed flows whose merge is proven, so it never touches dirty or unmerged flows. Skip the fetch when the repository has no `origin`.
+
+3. Create a unique flow ID. Keep the returned worktree `path` (this is `W`) and `base_sha`.
 
    In a Claude app worktree session, or any clean linked worktree that will host a single writer, reuse it. This switches it to `af/<id>` from its current HEAD, records the original branch, and sets the base of `af/<id>` to origin's default branch (`refs/remotes/origin/HEAD`, else the original branch's upstream, else none):
 
@@ -35,7 +44,7 @@ Shell variables in the commands below: `R` is the repository (or the current wor
    af worktree create --repo "$R" --flow-id <id>
    ```
 
-3. Start the flow from `W` (on branch `af/<id>`) using the chosen ordered skills:
+4. Start the flow from `W` (on branch `af/<id>`) using the chosen ordered skills:
 
    ```sh
    af state start --repo "$W" --flow-id <id> --base-sha <base_sha> --chain <skill> [<skill> ...]
@@ -173,7 +182,7 @@ Before the gate decision, review any final repair diff.
 
 Done when both reviews of the latest round return no blocking findings and the round log shows every finding closed.
 
-## 6. Decide, PR, merge
+## 6. Decide, PR, merge, clean up
 
 The full suite must pass on the HEAD you decide on. A passing full-suite run on that same HEAD (for example the last high-risk round's committed SHA in `$S/rounds.md`) is reused; run it again only when HEAD differs from that SHA:
 
@@ -182,9 +191,46 @@ af gate test --repo "$W" --flow-id <id> --suite full
 af gate decide --repo "$W" --flow-id <id> --tests pass --reviews pass
 ```
 
-A high-risk path or disabled `auto_merge` returns `ask`; missing config, failed checks, or a dirty worktree returns `blocked`. `gate decide` exits 2 for every `blocked` decision and 0 for `merge` or `ask`.
+| Decision | Exit | What to do |
+|---|---|---|
+| `merge` | 0 | Continue. |
+| `ask` | 0 | Continue. The owner approved high-risk and `auto_merge: false` merges on 2026-11-06. High-risk paths still get two reviews per round and the full suite every round, as in section 5. |
+| `owner` | 3 | The diff touches payment code (`owner_approval_paths`). Push and open the PR, then stop and ask the owner. After their OK, run `af gate merge` with `--owner-approved`. |
+| `blocked` | 2 | Fix the cause (failed tests or reviews, dirty worktree, config error, a base that is not on origin) and decide again. Never merge. |
 
-Continue to the project's normal PR process when the decision is `merge`, or when the owner OKs an `ask`. Push and open the PR only with the owner's OK. In the Claude desktop app, bind the PR with the `ccd_pr` tools and offer Auto-fix instead of polling CI.
+For `merge` and `ask`, continue without asking:
+
+1. Push the branch: `git -C "$W" push origin "af/<id>"`. Do not use `-u`: af never treats a branch as merged because it matches its own remote copy.
+2. Open the PR with the `pr` skill (`gh pr create --base <default> --head af/<id>`). In the Claude desktop app, bind it with the `ccd_pr` tool `bind_pr`. Do not poll CI and do not schedule CI checks.
+3. Merge through the gate, the only af command that merges:
+
+   ```sh
+   af gate merge --repo "$W" --flow-id <id> --tests pass --reviews pass
+   ```
+
+   After the owner OKs an `owner` decision, run the same command with `--owner-approved`:
+
+   ```sh
+   af gate merge --repo "$W" --flow-id <id> --tests pass --reviews pass --owner-approved
+   ```
+
+`gate merge` prints a `merge` field and exits:
+
+| Result | Exit | What to do |
+|---|---|---|
+| `merged` | 0 | Clean up now. |
+| `auto` | 0 | GitHub merges after the required checks pass. Clean up now if possible; otherwise the sweep in section 1 does it before the next flow. Read the rule below before pushing anything else to `af/<id>`. |
+| `queued` | 0 | The request was accepted but GitHub has not merged yet (merge queue). The sweep in section 1 cleans up. Do not push to `af/<id>`; read the rule below. |
+| `waiting_for_ci` | 4 | Nothing was enabled or merged. Report the JSON `reasons` to the owner: auto-merge is not allowed (`allow_auto_merge`), a pending check is not required (GitHub auto-merge would not wait for it), a pending check shares its name with another check in the rollup (the app behind a check is unknown), no check is required, or the required checks could not be read. |
+| blocked or `owner` | 2 or 3 | Stop. The JSON `reasons` say why (missing PR at the tested tip, failing CI, merge refused, owner approval missing). |
+
+After `auto` or `queued`, the PR merges on its own, so do not let new commits reach it unreviewed. After `auto`, run `gh pr merge <n> --disable-auto` before any new push to `af/<id>`. After `queued`, do not push to `af/<id>`: `gh pr merge --disable-auto` (gh 2.101) reports success for a queued PR without dequeuing it. If a change is needed, dequeue first with `gh api graphql -f query='mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { mergeQueueEntry { id } } }' -f id=<PR node id>` and confirm with `gh api graphql -f query='query($id: ID!) { node(id: $id) { ... on PullRequest { isInMergeQueue } } }' -f id=<PR node id>` that `isInMergeQueue` is false (the PR node id comes from `gh pr view af/<id> --json id`). The new head then goes through tests, both reviews, `gate decide` and `gate merge` again (a repair round, or a fix the owner asks for). Auto-fix in the Claude desktop app pushes to the PR on its own, so do not turn it on for an af PR while auto-merge is enabled.
+
+Clean up after the merge:
+
+1. Complete the remaining steps with `af state complete` (the `retro` step is in section 7).
+2. From the primary checkout `P`, remove the flow worktree and branches: `af worktree remove --repo "$P" --flow-id <id>`, or sweep with `af cleanup --repo "$P" --worktrees`. With a merge proof it also deletes `origin/af/<id>` when the remote still has it at the merged tip. If removal refuses because the PR is not merged yet (`auto` or `queued`), leave it for the next sweep.
+3. In `P`, when it is clean and on the default branch, run `git -C "$P" pull --ff-only`. If that fails because local main has other unpushed commits, report it; never rebase or reset. Then `git -C "$P" fetch --prune origin`.
 
 Stacked PRs (PR B based on PR A's branch):
 
@@ -193,7 +239,7 @@ Stacked PRs (PR B based on PR A's branch):
 - If A was squashed anyway, rebase B with `git rebase --onto origin/main <A's old tip> af/<B-id>`.
 - af's own cleanup: `af worktree remove` treats a merge-commit merge as merged by ancestry and a squash merge only via `gh pr view` `MERGED` with matching `headRefOid`.
 
-Done when the decision is recorded and, for `merge` or an owner-approved `ask`, the PR is open.
+Done when the decision is recorded, the PR is open, and `gate merge` reported `merged`, `auto` or `queued` (or, for `owner`, the owner has been asked); after `merged`, the worktree and branches are removed.
 
 ## 7. Retro
 
@@ -221,9 +267,9 @@ Reviewer selection prefers a different company when the role has any configured 
 
 ### Config
 
-Config resolves from `--config`, `$AF_CONFIG`, the primary checkout's `af.config.json`, then `~/.config/af/af.config.json`. Any resolved config path inside a worktree on an `af/*` branch, including the primary checkout, is refused. `state start` records the resolved config path and the SHA-256 of the effective config, including inherited global `roles` and `high_risk_paths`; `state advance`/`resume`, `select --flow-id`, `dispatch`, and `gate test`/`commit`/`decide` fail closed with `config changed since flow start` if it changes during the flow.
+Config resolves from `--config`, `$AF_CONFIG`, the primary checkout's `af.config.json`, then `~/.config/af/af.config.json`. Any resolved config path inside a worktree on an `af/*` branch, including the primary checkout, is refused. `state start` records the resolved config path and the SHA-256 of the effective config, including inherited global `roles`, `high_risk_paths` and `owner_approval_paths`; `state advance`/`resume`, `select --flow-id`, `dispatch`, and `gate test`/`commit`/`decide`/`merge` fail closed with `config changed since flow start` if it changes during the flow.
 
-When a project config is selected, it inherits `roles` from `$HOME/.config/af/af.config.json` only when the project omits the `roles` key; a project `roles` map replaces it entirely, with no per-role merge. An invalid inherited role map fails closed as an invalid global config, and selecting a role absent from the resolved map reports `role not configured: <role>`. The global `high_risk_paths` baseline is prepended to the project's list; duplicates keep their last occurrence. Other global fields are not inherited.
+When a project config is selected, it inherits `roles` from `$HOME/.config/af/af.config.json` only when the project omits the `roles` key; a project `roles` map replaces it entirely, with no per-role merge. An invalid inherited role map fails closed as an invalid global config, and selecting a role absent from the resolved map reports `role not configured: <role>`. The global `high_risk_paths` and `owner_approval_paths` baselines are prepended to the project's lists; duplicates keep their last occurrence. Other global fields are not inherited.
 
 Candidate options (`tools`, `env_allow`, `base_url` plus `api_key_command`) are in [`CANDIDATES.md`](CANDIDATES.md) next to this file; read it when writing or reviewing a role's candidates.
 
@@ -237,4 +283,4 @@ af cleanup --repo "$R"
 af cleanup --repo "$R" --worktrees
 ```
 
-Worktree removal refuses tracked changes and untracked non-ignored files. It accepts the branch as merged when it is an ancestor of the recorded base, or, for squash merges, when `gh pr view af/<id>` reports `MERGED` with `headRefOid` equal to the local branch tip; a missing `gh` or failed query refuses removal. Use `--force` only after reviewing the work. A reused flow never removes the worktree: removal switches it back to the original branch and deletes `af/<id>`, and refuses a dirty worktree even with `--force`. `cleanup --worktrees` applies the same removal to completed flows, lists the ones it skipped with the reason, and keeps their records for a later retry. Cleanup archives or deletes only completed or stopped records and their logs according to `record_retention`.
+Worktree removal refuses tracked changes and untracked non-ignored files. It accepts the branch as merged when it is an ancestor of the recorded base, or, for squash merges, when `gh pr view af/<id>` reports `MERGED` with `headRefOid` equal to the local branch tip (an upstream that is the branch's own remote copy, as `push -u` creates, is never a proof); a missing `gh` or failed query refuses removal. Use `--force` only after reviewing the work. With a merge proof, removal also deletes `origin/af/<id>` when the remote branch sits at exactly the local tip (for repositories without `delete_branch_on_merge`); the result reports `remote_branch` (`deleted`, `absent`, `kept: <reason>`, or `no remote`), and `--force` never touches the remote. `af gate merge` is the only af command that merges (see section 6). A reused flow never removes the worktree: removal switches it back to the original branch and deletes `af/<id>`, and refuses a dirty worktree even with `--force`. `cleanup --worktrees` applies the same removal to completed flows, lists the ones it skipped with the reason, and keeps their records for a later retry. Cleanup archives or deletes only completed or stopped records and their logs according to `record_retention`.

@@ -194,6 +194,39 @@ class CleanupCommandTests(unittest.TestCase):
                             "--worktrees")
         self.assertEqual(json.loads(again.stdout)["worktrees"]["removed"], [])
 
+    def test_worktrees_flag_deletes_the_remote_branch_of_merged_flows_only(self):
+        origin = self.base / "origin.git"
+        git(self.base, "init", "-q", "--bare", str(origin))
+        git(self.repo, "remote", "add", "origin", str(origin))
+        self.fake_merged_gh("af/merged-remote")
+        merged = self.flow_worktree("merged-remote", "complete")
+        open_pr = self.flow_worktree("open-remote", "complete")
+        for worktree, flow_id in ((merged, "merged-remote"), (open_pr, "open-remote")):
+            git(worktree, "push", "-q", "origin", f"af/{flow_id}")
+
+        report = self.cleanup_worktrees()["worktrees"]
+
+        self.assertEqual(report["removed"], ["merged-remote"])
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["open-remote"])
+        self.assertEqual(git(origin, "for-each-ref", "--format=%(refname:short)", "refs/heads/af/"),
+                         "af/open-remote")
+
+    def test_worktrees_flag_skips_a_pushed_unmerged_flow_and_keeps_its_remote_branch(self):
+        origin = self.base / "origin.git"
+        git(self.base, "init", "-q", "--bare", str(origin))
+        git(self.repo, "remote", "add", "origin", str(origin))
+        self.fake_merged_gh()
+        worktree = self.flow_worktree("pushed-open", "complete")
+        git(worktree, "push", "-q", "-u", "origin", "af/pushed-open")
+
+        report = self.cleanup_worktrees()["worktrees"]
+
+        self.assertEqual(report["removed"], [])
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["pushed-open"])
+        self.assertTrue(worktree.exists())
+        self.assertEqual(git(origin, "for-each-ref", "--format=%(refname:short)", "refs/heads/af/"),
+                         "af/pushed-open")
+
     def test_worktrees_flag_keeps_expired_records_of_skipped_flows_for_retry(self):
         bin_dir = self.base / "bin"
         bin_dir.mkdir()

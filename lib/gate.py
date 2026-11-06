@@ -156,13 +156,16 @@ def flow_context(repo, flow_id):
 def add_gate_parser(commands):
     parser = commands.add_parser("gate", help="run test, commit, and merge gates")
     actions = parser.add_subparsers(dest="gate_action", required=True)
-    for name in ("test", "decide"):
+    for name in ("test", "decide", "merge"):
         action = add_flow_args(actions.add_parser(name))
         if name == "test":
             action.add_argument("--suite", choices=("focused", "full"), required=True)
         else:
             action.add_argument("--tests", choices=("pass", "fail", "pending"), required=True)
             action.add_argument("--reviews", choices=("pass", "fail", "pending"), required=True)
+        if name == "merge":
+            action.add_argument("--owner-approved", action="store_true",
+                                help="the owner approved merging a diff that touches owner_approval_paths")
     commit = add_flow_args(actions.add_parser("commit"))
     commit.add_argument("--paths", nargs="+", required=True)
     commit.add_argument("--message", required=True)
@@ -171,43 +174,201 @@ def emit(result, status=0):
     print(json.dumps(result, ensure_ascii=False))
     return status
 
-def run_gate(args):
-    root = repository_root(args.repo)
-    if args.gate_action == "commit":
-        load_recorded_config(read_record(state_path(root, args.flow_id)), root)
-        return emit(commit_paths(root, args.flow_id, args.paths, args.message))
+OWNER_STATUS = 3
+OFF_ORIGIN = ("base_sha is not on origin's default branch: the PR would carry unpushed commits; "
+              "run git fetch origin or start the flow from origin's default branch")
+DECISION_STATUS = {"merge": 0, "ask": 0, "blocked": 2, "owner": OWNER_STATUS}
 
+def base_off_origin(worktree, base):
+    """True when origin's default branch is known locally and base is not part of it (local refs only)."""
+    if "origin" not in git(worktree, "remote").stdout.split(): return False
+    default = git(worktree, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD^{commit}", check=False)
+    return default.returncode == 0 and git(worktree, "merge-base", "--is-ancestor", str(base),
+                                           default.stdout.strip(), check=False).returncode != 0
+
+def evaluate(root, args):
+    """Return (decision result, exit status, flow worktree or None); shared by gate decide and gate merge."""
     try:
         record, worktree = flow_context(root, args.flow_id)
         config = load_recorded_config(record, root)
     except (RuntimeError, ValueError) as exc:
-        if args.gate_action == "decide":
-            return emit({"decision": "blocked", "reasons": [f"cannot load required config: {exc}"]}, 2)
-        return emit({"suite": args.suite, "passed": False, "timed_out": False, "error": str(exc)}, 2)
-
-    if args.gate_action == "test":
-        try:
-            code, result = run_test_suite(worktree, config, args.suite)
-        except (RuntimeError, ValueError) as exc:
-            result = {"suite": args.suite, "passed": False, "timed_out": False, "error": str(exc)}
-            code = 2
-        return emit(result, code)
+        return {"decision": "blocked", "reasons": [f"cannot load required config: {exc}"]}, 2, None
 
     base = record.get("base_sha")
     if git(worktree, "status", "--porcelain=v1", "-z").stdout:
-        return emit({"decision": "blocked", "reasons": ["uncommitted changes: run af gate commit first"]}, 2)
+        return {"decision": "blocked", "reasons": ["uncommitted changes: run af gate commit first"]}, 2, worktree
     head = f"refs/heads/af/{args.flow_id}"
     try:
         high = high_risk_paths(worktree, config.get("high_risk_paths", []), base, head)
+        owner = high_risk_paths(worktree, config.get("owner_approval_paths", []), base, head)
     except (RuntimeError, ValueError) as exc:
-        return emit({"decision": "blocked", "reasons": [f"cannot check changed paths: {exc}"]}, 2)
+        return {"decision": "blocked", "reasons": [f"cannot check changed paths: {exc}"]}, 2, worktree
     if args.tests != "pass" or args.reviews != "pass":
         decision, reasons = "blocked", ["tests and reviews must pass"]
+    elif base_off_origin(worktree, base):
+        decision, reasons = "blocked", [OFF_ORIGIN]
+    elif owner:
+        decision, reasons = "owner", ["payment paths need the owner's approval before merging"]
     elif high:
         decision, reasons = "ask", ["high-risk paths require owner review"]
     elif not config.get("auto_merge", True):
         decision, reasons = "ask", ["auto_merge is disabled"]
     else:
         decision, reasons = "merge", []
-    return emit({"decision": decision, "reasons": reasons, "high_risk_paths": high},
-                2 if decision == "blocked" else 0)
+    return ({"decision": decision, "reasons": reasons, "high_risk_paths": high, "owner_approval_paths": owner},
+            DECISION_STATUS[decision], worktree)
+
+FAILING_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"}
+AUTO_MERGE_MUTATION = ("mutation($id: ID!, $oid: GitObjectID!) { enablePullRequestAutoMerge(input: "
+                       "{pullRequestId: $id, mergeMethod: SQUASH, expectedHeadOid: $oid}) { pullRequest { number } } }")
+
+def run_gh(worktree, *args):
+    try:
+        return subprocess.run(["gh", *args], cwd=worktree, text=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess(args, 127, "", f"gh failed: {exc}")
+
+def check_name(item):
+    return item.get("name") or item.get("context") or "unnamed check"
+
+def classify_checks(rollup):
+    """Return (names of failing checks, names of pending checks)."""
+    failing, pending = [], []
+    for item in rollup:
+        name = check_name(item)
+        if "state" in item:
+            if item["state"] in ("FAILURE", "ERROR"): failing.append(name)
+            elif item["state"] in ("PENDING", "EXPECTED"): pending.append(name)
+        elif item.get("conclusion") in FAILING_CONCLUSIONS: failing.append(name)
+        elif item.get("status") != "COMPLETED": pending.append(name)
+    return failing, pending
+
+def gh_json(worktree, *args):
+    result = run_gh(worktree, *args)
+    if result.returncode: raise RuntimeError(result.stderr.strip() or f"gh {' '.join(args[:2])} failed")
+    try:
+        return json.loads(result.stdout)
+    except ValueError as exc:
+        raise RuntimeError(f"gh {' '.join(args[:2])} returned invalid JSON: {exc}") from exc
+
+def required_checks(worktree, base):
+    """Names GitHub auto-merge waits for on the base branch (protection plus rulesets); raises when unreadable."""
+    if not base: raise RuntimeError("cannot read required checks: the pull request has no base branch")
+    branch = gh_json(worktree, "api", f"repos/{{owner}}/{{repo}}/branches/{base}")
+    # The rules endpoint returns 30 rules per page; --slurp wraps all pages in one outer array.
+    pages = gh_json(worktree, "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base}", "--paginate", "--slurp")
+
+    def shaped(value, kind, what, required=False):
+        if value is None and not required: return kind()
+        if not isinstance(value, kind): raise RuntimeError(f"cannot read required checks: unexpected {what}")
+        return value
+
+    def contexts(items, what):
+        if not all(isinstance(item, dict) and isinstance(item.get("context"), str) for item in items):
+            raise RuntimeError(f"cannot read required checks: unexpected {what}")
+        return {item["context"] for item in items}
+
+    shaped(branch, dict, "response shape", required=True)
+    shaped(pages, list, "response shape", required=True)
+    if not all(isinstance(page, list) for page in pages):
+        raise RuntimeError("cannot read required checks: unexpected response shape")
+    protection = shaped(shaped(branch.get("protection"), dict, "protection")
+                        .get("required_status_checks"), dict, "required_status_checks")
+    names = set()
+    legacy = shaped(protection.get("contexts"), list, "contexts")
+    if not all(isinstance(name, str) for name in legacy):
+        raise RuntimeError("cannot read required checks: unexpected contexts")
+    checks = contexts(shaped(protection.get("checks"), list, "checks"), "checks")
+    if protection.get("enforcement_level") != "off":
+        names.update(legacy, checks)
+    for rule in (rule for page in pages for rule in page):
+        if not isinstance(rule, dict): raise RuntimeError("cannot read required checks: unexpected rule")
+        if rule.get("type") == "required_status_checks":
+            parameters = shaped(rule.get("parameters"), dict, "rule parameters")
+            names.update(contexts(shaped(parameters.get("required_status_checks"), list, "rule checks"), "rule checks"))
+    return names
+
+def merge_flow(root, args):
+    result, status, worktree = evaluate(root, args)
+    result.setdefault("high_risk_paths", [])
+    result.setdefault("owner_approval_paths", [])
+    if status == 2 or result["decision"] == "owner" and not args.owner_approved:
+        return result, status
+
+    def blocked(reason):
+        return {**result, "decision": "blocked", "reasons": [reason]}, 2
+
+    tip = git(worktree, "rev-parse", f"refs/heads/af/{args.flow_id}").stdout.strip()
+    need_pr = "push the tested tip and open the PR first"
+    view = run_gh(worktree, "pr", "view", f"af/{args.flow_id}", "--json",
+                  "id,number,url,state,headRefOid,baseRefName,statusCheckRollup")
+    try:
+        pr = json.loads(view.stdout) if view.returncode == 0 else None
+    except ValueError:
+        pr = None
+    rollup = pr.get("statusCheckRollup") or [] if isinstance(pr, dict) else None
+    if (not isinstance(rollup, list) or not all(isinstance(item, dict) for item in rollup)
+            or pr.get("state") != "OPEN" or pr.get("headRefOid") != tip):
+        return blocked(f"no open pull request at the tested tip {tip[:12]}: {need_pr}")
+    result = {**result, "pr": pr.get("number"), "url": pr.get("url")}
+
+    failing, pending = classify_checks(rollup)
+    if failing: return blocked(f"CI is failing: {', '.join(failing)}")
+    # An empty rollup with workflow files means CI may not have registered on the PR yet.
+    unregistered = not rollup and bool(git(worktree, "ls-tree", "-r", "--name-only", tip, "--",
+                                           ".github/workflows/").stdout.strip())
+    if pending or unregistered:
+        def waiting(reason):
+            return {**result, "merge": "waiting_for_ci", "reasons": [reason]}, 4
+        # The rollup does not say which app produced a check, so a pending twin could hide behind a required name.
+        names = [check_name(item) for item in rollup]
+        twins = sorted({name for name in pending if names.count(name) > 1})
+        if twins:
+            return waiting(f"the same check name appears more than once and one is pending: {', '.join(twins)}")
+        # GitHub auto-merge waits for required checks only; any other pending check could be skipped.
+        try:
+            required = required_checks(worktree, pr.get("baseRefName"))
+        except RuntimeError as exc:
+            return waiting(str(exc))
+        unrequired = [name for name in pending if name not in required]
+        if unrequired:
+            return waiting(f"GitHub auto-merge would not wait for these non-required checks: {', '.join(unrequired)}")
+        if unregistered and not required:
+            return waiting("CI has not registered checks and none are required")
+        enabled = run_gh(worktree, "api", "graphql", "-f", f"query={AUTO_MERGE_MUTATION}",
+                         "-f", f"id={pr.get('id')}", "-f", f"oid={tip}")
+        if enabled.returncode:
+            return waiting(enabled.stderr.strip() or "could not enable auto-merge")
+        return {**result, "merge": "auto"}, 0
+    merged = run_gh(worktree, "pr", "merge", str(pr.get("number")), "--squash", "--match-head-commit", tip)
+    if merged.returncode:
+        return blocked(merged.stderr.strip() or "gh pr merge failed")
+    # A merge queue accepts the request without merging yet; only GitHub saying MERGED counts.
+    state = run_gh(worktree, "pr", "view", f"af/{args.flow_id}", "--json", "state")
+    try:
+        done = state.returncode == 0 and json.loads(state.stdout).get("state") == "MERGED"
+    except (ValueError, AttributeError):
+        done = False
+    return {**result, "merge": "merged" if done else "queued"}, 0
+
+def run_gate(args):
+    root = repository_root(args.repo)
+    if args.gate_action == "commit":
+        load_recorded_config(read_record(state_path(root, args.flow_id)), root)
+        return emit(commit_paths(root, args.flow_id, args.paths, args.message))
+
+    if args.gate_action == "decide":
+        result, status, _ = evaluate(root, args)
+        return emit(result, status)
+    if args.gate_action == "merge":
+        return emit(*merge_flow(root, args))
+
+    try:
+        record, worktree = flow_context(root, args.flow_id)
+        config = load_recorded_config(record, root)
+        code, result = run_test_suite(worktree, config, args.suite)
+    except (RuntimeError, ValueError) as exc:
+        result = {"suite": args.suite, "passed": False, "timed_out": False, "error": str(exc)}
+        code = 2
+    return emit(result, code)

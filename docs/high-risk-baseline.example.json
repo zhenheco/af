@@ -63,5 +63,22 @@
     "crypto/",
     "*.rules",
     "af.config.json"
+  ],
+  "owner_approval_paths": [
+    "payment/",
+    "payments/",
+    "billing/",
+    "checkout/",
+    "invoice/",
+    "invoices/",
+    "*payment*",
+    "*billing*",
+    "*refund*",
+    "*invoice*",
+    "*checkout*",
+    "*reconcil*",
+    "*payuni*",
+    "*stripe*",
+    "*amego*"
   ]
 }

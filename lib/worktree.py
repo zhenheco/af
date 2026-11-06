@@ -110,8 +110,8 @@ def create(repo_arg, flow_id, reuse=False):
         git(repo, "branch", "--set-upstream-to", base_ref, branch)
     print(json.dumps({"flow_id": flow_id, "branch": branch, "path": str(target), "base_sha": base_sha}))
 
-def merged_pull_request(target, branch):
-    """True only when GitHub reports this branch's PR merged at exactly the local tip."""
+def merged_pull_request(target, branch, tip):
+    """True only when GitHub reports this branch's PR merged at exactly the given tip."""
     try:
         result = subprocess.run(["gh", "pr", "view", branch, "--json", "state,headRefOid"], cwd=target,
                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
@@ -119,15 +119,37 @@ def merged_pull_request(target, branch):
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
     return (isinstance(report, dict) and report.get("state") == "MERGED"
-            and report.get("headRefOid") == git_output(target, "rev-parse", f"refs/heads/{branch}"))
+            and report.get("headRefOid") == tip)
 
-def merge_proof(repo, target, branch):
-    """Return how the branch is proven merged: "ancestor", "pull-request", or None."""
+def merge_proof(repo, target, branch, tip):
+    """Return how the tip is proven merged: "ancestor", "pull-request", or None."""
+    # A pushed branch (push -u) tracks a branch of its own name on some remote (or "."); that copy proves
+    # nothing about being merged. Read the tracking config: the tracking ref's name depends on fetch refspecs.
+    # @{upstream} uses the first value, --get the last: judge every value, and trust none when there are several.
+    merges = git(repo, "config", "--get-all", f"branch.{branch}.merge", check=False).stdout.split()
+    own_copy = len(merges) > 1 or f"refs/heads/{branch}" in merges
     base = git(repo, "rev-parse", "--verify", f"{branch}@{{upstream}}", check=False)
-    if base.returncode == 0 and git(repo, "merge-base", "--is-ancestor", f"refs/heads/{branch}",
-                                    base.stdout.strip(), check=False).returncode == 0:
+    if (not own_copy and base.returncode == 0
+            and git(repo, "merge-base", "--is-ancestor", tip,
+                    base.stdout.strip(), check=False).returncode == 0):
         return "ancestor"
-    return "pull-request" if merged_pull_request(target, branch) else None
+    return "pull-request" if merged_pull_request(target, branch, tip) else None
+
+def delete_remote_branch(repo, branch, tip):
+    """Delete origin's copy of a merged flow branch (repos without delete_branch_on_merge); never raises."""
+    try:
+        if "origin" not in git(repo, "remote").stdout.split(): return "no remote"
+        ref = f"refs/heads/{branch}"
+        listed = git(repo, "ls-remote", "--heads", "origin", ref, check=False)
+        if listed.returncode: return f"kept: {listed.stderr.strip() or 'cannot list origin'}"
+        remote = next((line.split("\t")[0] for line in listed.stdout.splitlines() if line.endswith(f"\t{ref}")), None)
+        if remote is None: return "absent"
+        if remote != tip: return f"kept: origin has {branch} at {remote[:12]}, not the merged tip {tip[:12]}"
+        # The lease turns a push that lands after the check above into a rejection, not a lost commit.
+        deleted = git(repo, "push", f"--force-with-lease={ref}:{tip}", "origin", f":{ref}", check=False)
+        return "deleted" if deleted.returncode == 0 else f"kept: {deleted.stderr.strip() or 'push failed'}"
+    except (OSError, RuntimeError) as exc:
+        return f"kept: {exc}"
 
 def remove_flow(repo_arg, flow_id, force=False):
     validate_flow_id(flow_id)
@@ -156,7 +178,9 @@ def remove_flow(repo_arg, flow_id, force=False):
         # A reused worktree belongs to the session, so even --force never discards its changes.
         raise RuntimeError("refusing to remove a flow worktree with tracked changes or untracked non-ignored files; review it"
                            + ("" if original is not None else " or use --force"))
-    proof = None if force else merge_proof(repo, target, branch)
+    # Read the tip once: the proof, the local delete and the remote lease are all bound to this SHA.
+    tip = git_output(repo, "rev-parse", f"refs/heads/{branch}")
+    proof = None if force else merge_proof(repo, target, branch, tip)
     if not force and not proof:
         raise RuntimeError("flow branch is not merged into its base and no merged pull request has the same head; "
                            "use --force after reviewing it")
@@ -164,10 +188,15 @@ def remove_flow(repo_arg, flow_id, force=False):
     if original is None:
         git(repo, "worktree", "remove", *(["--force"] if force else []), str(target))
     else:
-        git(target, "switch", "-q", *([original] if original else ["--detach", f"refs/heads/{branch}"]))
-    git(repo, "branch", "-d" if proof == "ancestor" else "-D", branch)
+        git(target, "switch", "-q", *([original] if original else ["--detach", tip]))
+    # Compare-and-delete: fails if the ref moved, so a tip advanced after the proof is never lost.
+    if git(repo, "update-ref", "-d", f"refs/heads/{branch}", tip, check=False).returncode:
+        raise RuntimeError(f"{branch} moved after its merge was proven; review it")
+    git(repo, "config", "--remove-section", f"branch.{branch}", check=False)
+    # Only a removal backed by a merge proof may touch the remote.
+    remote = "kept: --force removals never touch the remote" if force else delete_remote_branch(repo, branch, tip)
     return {"flow_id": flow_id, "removed": True, "branch": branch, "path": str(target),
-            "reused": original is not None}
+            "reused": original is not None, "remote_branch": remote}
 
 def remove(repo_arg, flow_id, force=False):
     print(json.dumps(remove_flow(repo_arg, flow_id, force)))
