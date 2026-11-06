@@ -229,11 +229,14 @@ def run_gh(worktree, *args):
     except (OSError, subprocess.TimeoutExpired) as exc:
         return subprocess.CompletedProcess(args, 127, "", f"gh failed: {exc}")
 
+def check_name(item):
+    return item.get("name") or item.get("context") or "unnamed check"
+
 def classify_checks(rollup):
     """Return (names of failing checks, names of pending checks)."""
     failing, pending = [], []
     for item in rollup:
-        name = item.get("name") or item.get("context") or "unnamed check"
+        name = check_name(item)
         if "state" in item:
             if item["state"] in ("FAILURE", "ERROR"): failing.append(name)
             elif item["state"] in ("PENDING", "EXPECTED"): pending.append(name)
@@ -253,18 +256,38 @@ def required_checks(worktree, base):
     """Names GitHub auto-merge waits for on the base branch (protection plus rulesets); raises when unreadable."""
     if not base: raise RuntimeError("cannot read required checks: the pull request has no base branch")
     branch = gh_json(worktree, "api", f"repos/{{owner}}/{{repo}}/branches/{base}")
-    rules = gh_json(worktree, "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base}")
-    if not isinstance(branch, dict) or not isinstance(rules, list):
+    # The rules endpoint returns 30 rules per page; --slurp wraps all pages in one outer array.
+    pages = gh_json(worktree, "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base}", "--paginate", "--slurp")
+
+    def shaped(value, kind, what):
+        if value is None: return kind()
+        if not isinstance(value, kind): raise RuntimeError(f"cannot read required checks: unexpected {what}")
+        return value
+
+    def contexts(items, what):
+        if not all(isinstance(item, dict) and isinstance(item.get("context"), str) for item in items):
+            raise RuntimeError(f"cannot read required checks: unexpected {what}")
+        return {item["context"] for item in items}
+
+    shaped(branch, dict, "response shape")
+    shaped(pages, list, "response shape")
+    if not all(isinstance(page, list) for page in pages):
         raise RuntimeError("cannot read required checks: unexpected response shape")
-    protection = (branch.get("protection") or {}).get("required_status_checks") or {}
+    protection = shaped(shaped(branch.get("protection"), dict, "protection")
+                        .get("required_status_checks"), dict, "required_status_checks")
     names = set()
+    legacy = shaped(protection.get("contexts"), list, "contexts")
+    if not all(isinstance(name, str) for name in legacy):
+        raise RuntimeError("cannot read required checks: unexpected contexts")
+    checks = contexts(shaped(protection.get("checks"), list, "checks"), "checks")
     if protection.get("enforcement_level") != "off":
-        names.update(protection.get("contexts") or [])
-        names.update(item.get("context") for item in protection.get("checks") or [] if isinstance(item, dict))
-    for rule in rules:
-        if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
-            names.update(item.get("context") for item in (rule.get("parameters") or {}).get("required_status_checks") or [])
-    return names - {None}
+        names.update(legacy, checks)
+    for rule in (rule for page in pages for rule in page):
+        if not isinstance(rule, dict): raise RuntimeError("cannot read required checks: unexpected rule")
+        if rule.get("type") == "required_status_checks":
+            parameters = shaped(rule.get("parameters"), dict, "rule parameters")
+            names.update(contexts(shaped(parameters.get("required_status_checks"), list, "rule checks"), "rule checks"))
+    return names
 
 def merge_flow(root, args):
     result, status, worktree = evaluate(root, args)
@@ -298,6 +321,11 @@ def merge_flow(root, args):
     if pending or unregistered:
         def waiting(reason):
             return {**result, "merge": "waiting_for_ci", "reasons": [reason]}, 4
+        # The rollup does not say which app produced a check, so a pending twin could hide behind a required name.
+        names = [check_name(item) for item in rollup]
+        twins = sorted({name for name in pending if names.count(name) > 1})
+        if twins:
+            return waiting(f"the same check name appears more than once and one is pending: {', '.join(twins)}")
         # GitHub auto-merge waits for required checks only; any other pending check could be skipped.
         try:
             required = required_checks(worktree, pr.get("baseRefName"))

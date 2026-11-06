@@ -276,10 +276,14 @@ class WorktreeCommandTests(unittest.TestCase):
 
     def test_pushed_upstream_of_its_own_branch_is_not_a_merge_proof(self):
         origin = self.add_origin()
-        for remote in ("origin", "mirror"):
+        for remote in ("origin", "mirror", "custom"):
             with self.subTest(remote=remote):
                 flow_id = f"pushed-{remote}"
-                if remote != "origin":
+                if remote == "custom":
+                    # The tracking ref name no longer ends with the branch name.
+                    git(self.repo, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/review-*")
+                    remote = "origin"
+                elif remote != "origin":
                     git(self.repo, "remote", "add", remote, str(origin))
                 worktree = Path(json.loads(self.run_af("worktree", "create", "--repo", str(self.repo),
                                                        "--flow-id", flow_id).stdout)["path"])

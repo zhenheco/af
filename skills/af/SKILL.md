@@ -220,11 +220,11 @@ For `merge` and `ask`, continue without asking:
 |---|---|---|
 | `merged` | 0 | Clean up now. |
 | `auto` | 0 | GitHub merges after the required checks pass. Clean up now if possible; otherwise the sweep in section 1 does it before the next flow. Read the rule below before pushing anything else to `af/<id>`. |
-| `queued` | 0 | The request was accepted but GitHub has not merged yet (merge queue). Treat it like `auto`: the sweep in section 1 cleans up. |
-| `waiting_for_ci` | 4 | Nothing was enabled or merged. Report the JSON `reasons` to the owner: auto-merge is not allowed (`allow_auto_merge`), a pending check is not required (GitHub auto-merge would not wait for it), no check is required, or the required checks could not be read. |
+| `queued` | 0 | The request was accepted but GitHub has not merged yet (merge queue). The sweep in section 1 cleans up. Do not push to `af/<id>`; read the rule below. |
+| `waiting_for_ci` | 4 | Nothing was enabled or merged. Report the JSON `reasons` to the owner: auto-merge is not allowed (`allow_auto_merge`), a pending check is not required (GitHub auto-merge would not wait for it), a pending check shares its name with another check in the rollup (the app behind a check is unknown), no check is required, or the required checks could not be read. |
 | blocked or `owner` | 2 or 3 | Stop. The JSON `reasons` say why (missing PR at the tested tip, failing CI, merge refused, owner approval missing). |
 
-After `auto` or `queued`, the PR merges on its own, so do not let new commits reach it unreviewed. Before any new push to `af/<id>` (a repair round, or a fix the owner asks for), first run `gh pr merge <number> --disable-auto`. The new head then goes through tests, both reviews, `gate decide` and `gate merge` again. Auto-fix in the Claude desktop app pushes to the PR on its own, so do not turn it on for an af PR while auto-merge is enabled.
+After `auto` or `queued`, the PR merges on its own, so do not let new commits reach it unreviewed. After `auto`, run `gh pr merge <n> --disable-auto` before any new push to `af/<id>`. After `queued`, do not push to `af/<id>`: `gh pr merge --disable-auto` (gh 2.101) reports success for a queued PR without dequeuing it. If a change is needed, dequeue first with `gh api graphql -f query='mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { mergeQueueEntry { id } } }' -f id=<PR node id>` and confirm with `gh api graphql -f query='query($id: ID!) { node(id: $id) { ... on PullRequest { isInMergeQueue } } }' -f id=<PR node id>` that `isInMergeQueue` is false (the PR node id comes from `gh pr view af/<id> --json id`). The new head then goes through tests, both reviews, `gate decide` and `gate merge` again (a repair round, or a fix the owner asks for). Auto-fix in the Claude desktop app pushes to the PR on its own, so do not turn it on for an af PR while auto-merge is enabled.
 
 Clean up after the merge:
 

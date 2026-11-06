@@ -447,9 +447,10 @@ class GateCommandTests(unittest.TestCase):
             "contexts": list(contexts), "checks": [{"context": name, "app_id": None} for name in contexts],
             "enforcement_level": "non_admins"}} if contexts else {"enabled": False}
         self.env["FAKE_GH_BRANCH_OUT"] = json.dumps({"name": "main", "protection": protection})
-        self.env["FAKE_GH_RULES_OUT"] = json.dumps(
+        # gh api --paginate --slurp wraps the pages in one outer array.
+        self.env["FAKE_GH_RULES_OUT"] = json.dumps([
             [{"type": "required_status_checks",
-              "parameters": {"required_status_checks": [{"context": name} for name in rules]}}] if rules else [])
+              "parameters": {"required_status_checks": [{"context": name} for name in rules]}}] if rules else []])
 
     def gh_calls(self):
         return self.gh_log.read_text().splitlines() if self.gh_log.exists() else []
@@ -617,7 +618,29 @@ class GateCommandTests(unittest.TestCase):
                 ("branch api fails", {"FAKE_GH_BRANCH_EXIT": "1", "FAKE_GH_BRANCH_ERR": "HTTP 403"}),
                 ("rules api fails", {"FAKE_GH_RULES_EXIT": "1", "FAKE_GH_RULES_ERR": "HTTP 500"}),
                 ("branch bad json", {"FAKE_GH_BRANCH_OUT": "not json"}),
-                ("rules not a list", {"FAKE_GH_RULES_OUT": "{}"})):
+                ("rules not a list", {"FAKE_GH_RULES_OUT": "{}"}),
+                ("rules page not a list", {"FAKE_GH_RULES_OUT": "[{}]"}),
+                ("protection not an object", {"FAKE_GH_BRANCH_OUT": json.dumps({"protection": [1]})}),
+                ("required_status_checks not an object",
+                 {"FAKE_GH_BRANCH_OUT": json.dumps({"protection": {"required_status_checks": [1]}})}),
+                ("contexts not strings",
+                 {"FAKE_GH_BRANCH_OUT": json.dumps({"protection": {"required_status_checks": {"contexts": ["unit", 1]}}})}),
+                ("contexts not a list",
+                 {"FAKE_GH_BRANCH_OUT": json.dumps({"protection": {"required_status_checks": {"contexts": "unit", "checks": [{"context": "unit"}]}}})}),
+                ("checks not objects",
+                 {"FAKE_GH_BRANCH_OUT": json.dumps({"protection": {"required_status_checks": {"contexts": ["unit"], "checks": [1]}}})}),
+                ("check context not a string",
+                 {"FAKE_GH_BRANCH_OUT": json.dumps(
+                     {"protection": {"required_status_checks": {"contexts": ["unit"], "checks": [{"context": 1}]}}})}),
+                ("rule not an object", {"FAKE_GH_RULES_OUT": json.dumps([[1]])}),
+                ("rule parameters not an object",
+                 {"FAKE_GH_RULES_OUT": json.dumps([[{"type": "required_status_checks", "parameters": [1]}]])}),
+                ("rule checks not a list",
+                 {"FAKE_GH_RULES_OUT": json.dumps(
+                     [[{"type": "required_status_checks", "parameters": {"required_status_checks": 1}}]])}),
+                ("rule check context missing",
+                 {"FAKE_GH_RULES_OUT": json.dumps(
+                     [[{"type": "required_status_checks", "parameters": {"required_status_checks": [{}]}}]])})):
             with self.subTest(label):
                 self.required_checks(contexts=["unit"])
                 self.gh_log.unlink(missing_ok=True)
@@ -627,6 +650,33 @@ class GateCommandTests(unittest.TestCase):
                 self.assertTrue(report["reasons"][0])
                 self.assertFalse(any(call.startswith(("api graphql", "pr merge")) for call in self.gh_calls()))
             for name in overrides: self.env.pop(name)
+
+    def test_merge_reads_every_page_of_the_branch_rules(self):
+        worktree, tip = self.merge_flow("gate-merge-pages")
+        self.gh_pr(tip, [{"__typename": "CheckRun", "name": "unit", "status": "QUEUED", "conclusion": ""}])
+        self.required_checks()
+        other = {"type": "pull_request", "parameters": {}}
+        late = {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "unit"}]}}
+        self.env["FAKE_GH_RULES_OUT"] = json.dumps([[other] * 30, [late]])
+
+        result, report = self.gate_merge(worktree, "gate-merge-pages")
+
+        self.assertEqual((result.returncode, report["merge"]), (0, "auto"))
+        rules_call = next(call for call in self.gh_calls() if "/rules/branches/" in call)
+        self.assertIn("--paginate --slurp", rules_call)
+
+    def test_merge_waits_when_a_pending_check_shares_a_name_with_another_check(self):
+        worktree, tip = self.merge_flow("gate-merge-twin")
+        self.gh_pr(tip, [{"__typename": "CheckRun", "name": "unit", "status": "QUEUED", "conclusion": ""},
+                         {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                         {"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": ""}])
+        self.required_checks(contexts=["unit", "build"])
+
+        result, report = self.gate_merge(worktree, "gate-merge-twin")
+
+        self.assertEqual((result.returncode, report["merge"]), (4, "waiting_for_ci"))
+        self.assertIn("build", report["reasons"][0])
+        self.assertFalse(any(call.startswith(("api graphql", "pr merge")) for call in self.gh_calls()))
 
     def test_merge_reports_waiting_for_ci_when_auto_merge_cannot_be_enabled(self):
         worktree, tip = self.merge_flow("gate-merge-waiting")
