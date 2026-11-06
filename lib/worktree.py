@@ -125,7 +125,9 @@ def merge_proof(repo, target, branch):
     """Return how the branch is proven merged: "ancestor", "pull-request", or None."""
     # A pushed branch (push -u) tracks a branch of its own name on some remote (or "."); that copy proves
     # nothing about being merged. Read the tracking config: the tracking ref's name depends on fetch refspecs.
-    own_copy = git(repo, "config", "--get", f"branch.{branch}.merge", check=False).stdout.strip() == f"refs/heads/{branch}"
+    # @{upstream} uses the first value, --get the last: judge every value, and trust none when there are several.
+    merges = git(repo, "config", "--get-all", f"branch.{branch}.merge", check=False).stdout.split()
+    own_copy = len(merges) > 1 or f"refs/heads/{branch}" in merges
     base = git(repo, "rev-parse", "--verify", f"{branch}@{{upstream}}", check=False)
     if (not own_copy and base.returncode == 0
             and git(repo, "merge-base", "--is-ancestor", f"refs/heads/{branch}",

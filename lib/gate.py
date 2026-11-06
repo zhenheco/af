@@ -259,8 +259,8 @@ def required_checks(worktree, base):
     # The rules endpoint returns 30 rules per page; --slurp wraps all pages in one outer array.
     pages = gh_json(worktree, "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base}", "--paginate", "--slurp")
 
-    def shaped(value, kind, what):
-        if value is None: return kind()
+    def shaped(value, kind, what, required=False):
+        if value is None and not required: return kind()
         if not isinstance(value, kind): raise RuntimeError(f"cannot read required checks: unexpected {what}")
         return value
 
@@ -269,8 +269,8 @@ def required_checks(worktree, base):
             raise RuntimeError(f"cannot read required checks: unexpected {what}")
         return {item["context"] for item in items}
 
-    shaped(branch, dict, "response shape")
-    shaped(pages, list, "response shape")
+    shaped(branch, dict, "response shape", required=True)
+    shaped(pages, list, "response shape", required=True)
     if not all(isinstance(page, list) for page in pages):
         raise RuntimeError("cannot read required checks: unexpected response shape")
     protection = shaped(shaped(branch.get("protection"), dict, "protection")

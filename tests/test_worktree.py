@@ -299,6 +299,24 @@ class WorktreeCommandTests(unittest.TestCase):
                 self.assertEqual(git(self.repo, "branch", "--list", f"af/{flow_id}"), f"+ af/{flow_id}")
                 self.assertIn(f"af/{flow_id}", self.remote_heads(origin))
 
+    def test_extra_tracking_values_cannot_hide_the_own_branch_upstream(self):
+        origin = self.add_origin()
+        worktree = Path(json.loads(self.run_af("worktree", "create", "--repo", str(self.repo),
+                                               "--flow-id", "multi-track").stdout)["path"])
+        head = self.commit_in(worktree, "multi.txt")
+        git(worktree, "push", "-q", "-u", "origin", "af/multi-track")
+        # --get would return only this last value; @{upstream} uses the first.
+        git(worktree, "config", "--add", "branch.af/multi-track.merge", "refs/heads/main")
+        self.gh_reports("OPEN", head)
+
+        removed = self.remove("multi-track")
+
+        self.assertNotEqual(removed.returncode, 0)
+        self.assertIn("not merged", removed.stderr)
+        self.assertTrue(worktree.exists())
+        self.assertEqual(git(self.repo, "branch", "--list", "af/multi-track"), "+ af/multi-track")
+        self.assertIn("af/multi-track", self.remote_heads(origin))
+
     def test_remove_keeps_a_remote_branch_that_advances_between_the_check_and_the_delete(self):
         origin = self.add_origin()
         worktree, head = self.merged_flow_with_remote_branch("remote-race")
