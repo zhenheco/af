@@ -211,6 +211,82 @@ class WorktreeCommandTests(unittest.TestCase):
         self.assertEqual(git(self.repo, "branch", "--list", "af/squash"), "")
         self.assertIn("pr view af/squash --json state,headRefOid", self.gh_log.read_text())
 
+    def add_origin(self):
+        origin = self.base / "origin.git"
+        git(self.base, "init", "-q", "--bare", str(origin))
+        git(self.repo, "remote", "add", "origin", str(origin))
+        git(self.repo, "push", "-q", "origin", git(self.repo, "branch", "--show-current"))
+        return origin
+
+    def merged_flow_with_remote_branch(self, flow_id, push=True):
+        worktree = Path(json.loads(self.run_af("worktree", "create", "--repo", str(self.repo),
+                                               "--flow-id", flow_id).stdout)["path"])
+        head = self.commit_in(worktree, f"{flow_id}.txt")
+        if push:
+            git(worktree, "push", "-q", "origin", f"af/{flow_id}")
+        self.squash_merge(flow_id)
+        self.gh_reports("MERGED", head)
+        return worktree, head
+
+    def remote_heads(self, origin):
+        return git(origin, "for-each-ref", "--format=%(refname:short)", "refs/heads/af/")
+
+    def test_remove_deletes_the_remote_branch_when_it_sits_at_the_merged_tip(self):
+        origin = self.add_origin()
+        worktree, _ = self.merged_flow_with_remote_branch("remote-gone")
+        self.assertEqual(self.remote_heads(origin), "af/remote-gone")
+
+        removed = self.remove("remote-gone")
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(json.loads(removed.stdout)["remote_branch"], "deleted")
+        self.assertEqual(self.remote_heads(origin), "")
+        self.assertFalse(worktree.exists())
+
+    def test_remove_reports_absent_remote_branch_and_missing_remote(self):
+        origin = self.add_origin()
+        self.merged_flow_with_remote_branch("remote-absent", push=False)
+        removed = self.remove("remote-absent")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(json.loads(removed.stdout)["remote_branch"], "absent")
+
+        git(self.repo, "remote", "remove", "origin")
+        self.merged_flow_with_remote_branch("no-remote", push=False)
+        removed = self.remove("no-remote")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(json.loads(removed.stdout)["remote_branch"], "no remote")
+
+    def test_remove_keeps_a_remote_branch_at_another_sha_or_that_cannot_be_deleted(self):
+        origin = self.add_origin()
+        self.merged_flow_with_remote_branch("remote-moved", push=False)
+        git(self.repo, "push", "-q", "origin", f"{self.checkout_sha}:refs/heads/af/remote-moved")
+        removed = self.remove("remote-moved")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(json.loads(removed.stdout)["remote_branch"].startswith("kept: "))
+        self.assertEqual(git(origin, "rev-parse", "refs/heads/af/remote-moved"), self.checkout_sha)
+
+        self.merged_flow_with_remote_branch("remote-protected")
+        hook = origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho protected >&2\nexit 1\n")
+        hook.chmod(0o755)
+        removed = self.remove("remote-protected")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(json.loads(removed.stdout)["remote_branch"].startswith("kept: "))
+        self.assertIn("af/remote-protected", self.remote_heads(origin))
+
+    def test_force_remove_never_touches_the_remote_branch(self):
+        origin = self.add_origin()
+        worktree = Path(json.loads(self.run_af("worktree", "create", "--repo", str(self.repo),
+                                               "--flow-id", "remote-force").stdout)["path"])
+        self.commit_in(worktree, "feature.txt")
+        git(worktree, "push", "-q", "origin", "af/remote-force")
+
+        removed = self.remove("remote-force", "--force")
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(json.loads(removed.stdout)["remote_branch"].startswith("kept: "))
+        self.assertEqual(self.remote_heads(origin), "af/remote-force")
+
     def test_remove_fails_closed_unless_github_proves_the_same_head_merged(self):
         created = self.run_af("worktree", "create", "--repo", str(self.repo), "--flow-id", "unproven")
         worktree = Path(json.loads(created.stdout)["path"])

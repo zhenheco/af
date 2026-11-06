@@ -168,6 +168,29 @@ class DoctorCommandTests(unittest.TestCase):
             "baseline_count": 2, "effective_count": None, "warnings": []
         })
 
+    def test_reports_effective_owner_approval_count_and_warns_when_empty(self):
+        global_config = self.home / ".config" / "af" / "af.config.json"
+        global_config.parent.mkdir(parents=True)
+        global_config.write_text(json.dumps({"owner_approval_paths": ["payment/", "*stripe*"]}))
+        self.write_config(owner_approval_paths=["*stripe*", "local/"])
+        report = json.loads(self.run_af("doctor", "--repo", self.repo, "--config", self.config).stdout)
+        self.assertEqual(report["owner_approval"], {"effective_count": 3, "warnings": []})
+
+        global_config.unlink()
+        self.write_config()
+        result = self.run_af("doctor", "--repo", self.repo, "--config", self.config)
+        report = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["owner_approval"], {
+            "effective_count": 0,
+            "warnings": ["owner_approval_paths is empty: payment diffs merge without the owner's approval"],
+        })
+
+        self.write_config(bogus=1)
+        report = json.loads(self.run_af("doctor", "--repo", self.repo, "--config", self.config).stdout)
+        self.assertEqual(report["owner_approval"], {"effective_count": None, "warnings": []})
+
     def test_missing_skill_and_invalid_config_fail(self):
         (self.skills / "retro" / "SKILL.md").unlink()
         missing = self.run_af("doctor", "--repo", self.repo, "--config", self.config)

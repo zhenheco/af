@@ -80,7 +80,7 @@ class SkillCommandContractTests(unittest.TestCase):
         expected = {
             "roles", "quota_stop.exit_statuses", "quota_stop.patterns",
             "quota_retry_minutes", "worker_timeout_minutes", "test_timeout_minutes",
-            "stale_after_minutes", "skill_dirs", "auto_merge", "high_risk_paths",
+            "stale_after_minutes", "skill_dirs", "auto_merge", "high_risk_paths", "owner_approval_paths",
             "tests.focused", "tests.full", "record_retention.archive_after_days",
             "record_retention.archive_dir", "record_retention.delete_after_days",
         }

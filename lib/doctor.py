@@ -32,10 +32,11 @@ def check(args):
         config, config_path = load_config(args.config, cwd=repo or Path(args.repo))
         config_report = {"valid": True, "path": str(config_path), "error": None}
         effective_count = len(config.get("high_risk_paths", []))
+        owner_count = len(config.get("owner_approval_paths", []))
     except (OSError, RuntimeError, ValueError) as exc:
         config = {}
         config_report = {"valid": False, "path": None, "error": str(exc)}
-        effective_count = None
+        effective_count = owner_count = None
 
     directories = skill_directories(config, repo or Path(args.repo))
     found = [name for name in REQUIRED_SKILLS
@@ -54,6 +55,9 @@ def check(args):
                             "effective_count": effective_count,
                             "warnings": ["high_risk_paths is empty: the merge gate auto-merges every path"]
                             if effective_count == 0 else []},
+              "owner_approval": {"effective_count": owner_count,
+                                 "warnings": ["owner_approval_paths is empty: payment diffs merge without the owner's approval"]
+                                 if owner_count == 0 else []},
               "config": config_report}
     return report
 

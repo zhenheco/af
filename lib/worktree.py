@@ -129,6 +129,21 @@ def merge_proof(repo, target, branch):
         return "ancestor"
     return "pull-request" if merged_pull_request(target, branch) else None
 
+def delete_remote_branch(repo, branch, tip):
+    """Delete origin's copy of a merged flow branch (repos without delete_branch_on_merge); never raises."""
+    try:
+        if "origin" not in git(repo, "remote").stdout.split(): return "no remote"
+        ref = f"refs/heads/{branch}"
+        listed = git(repo, "ls-remote", "--heads", "origin", ref, check=False)
+        if listed.returncode: return f"kept: {listed.stderr.strip() or 'cannot list origin'}"
+        remote = next((line.split("\t")[0] for line in listed.stdout.splitlines() if line.endswith(f"\t{ref}")), None)
+        if remote is None: return "absent"
+        if remote != tip: return f"kept: origin has {branch} at {remote[:12]}, not the merged tip {tip[:12]}"
+        deleted = git(repo, "push", "origin", "--delete", ref, check=False)
+        return "deleted" if deleted.returncode == 0 else f"kept: {deleted.stderr.strip() or 'push failed'}"
+    except (OSError, RuntimeError) as exc:
+        return f"kept: {exc}"
+
 def remove_flow(repo_arg, flow_id, force=False):
     validate_flow_id(flow_id)
     repo = primary_checkout(repo_arg)
@@ -165,9 +180,12 @@ def remove_flow(repo_arg, flow_id, force=False):
         git(repo, "worktree", "remove", *(["--force"] if force else []), str(target))
     else:
         git(target, "switch", "-q", *([original] if original else ["--detach", f"refs/heads/{branch}"]))
+    tip = git_output(repo, "rev-parse", f"refs/heads/{branch}")
     git(repo, "branch", "-d" if proof == "ancestor" else "-D", branch)
+    # Only a removal backed by a merge proof may touch the remote.
+    remote = "kept: --force removals never touch the remote" if force else delete_remote_branch(repo, branch, tip)
     return {"flow_id": flow_id, "removed": True, "branch": branch, "path": str(target),
-            "reused": original is not None}
+            "reused": original is not None, "remote_branch": remote}
 
 def remove(repo_arg, flow_id, force=False):
     print(json.dumps(remove_flow(repo_arg, flow_id, force)))

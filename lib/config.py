@@ -11,7 +11,10 @@ import subprocess
 
 FIELDS = {"roles", "quota_stop", "quota_retry_minutes",
           "worker_timeout_minutes", "test_timeout_minutes", "stale_after_minutes",
-          "skill_dirs", "auto_merge", "high_risk_paths", "tests", "record_retention"}
+          "skill_dirs", "auto_merge", "high_risk_paths", "owner_approval_paths", "tests", "record_retention"}
+
+# Global lists of gitignore-style globs that every project config inherits.
+PATH_BASELINES = ("high_risk_paths", "owner_approval_paths")
 
 def primary_checkout_root(cwd):
     result = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute",
@@ -86,8 +89,9 @@ def read_global_config(env):
         if not path.is_file(): raise OSError("not a readable regular file")
         config = json.loads(path.read_text())
         if not isinstance(config, dict): raise ValueError("config has invalid fields or type")
-        if "high_risk_paths" in config:
-            require_strings(config["high_risk_paths"], "high_risk_paths")
+        for field in PATH_BASELINES:
+            if field in config:
+                require_strings(config[field], field)
     except (OSError, RuntimeError, ValueError) as exc:
         raise RuntimeError(f"invalid global config {path}: {exc}") from exc
     return config
@@ -124,11 +128,12 @@ def load_config(explicit=None, cwd=None, env=None, require=True):
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"invalid global config {global_config_path(env)}: {exc}") from exc
         config["roles"] = global_config["roles"]
-    baseline = None if global_config is None else global_config.get("high_risk_paths")
-    if baseline is not None:
-        combined = [*baseline, *config.get("high_risk_paths", [])]
-        # Git ignore lets the last matching pattern decide, so dedupe keeps the last occurrence.
-        config["high_risk_paths"] = list(dict.fromkeys(reversed(combined)))[::-1]
+    for field in PATH_BASELINES:
+        baseline = None if global_config is None else global_config.get(field)
+        if baseline is not None:
+            combined = [*baseline, *config.get(field, [])]
+            # Git ignore lets the last matching pattern decide, so dedupe keeps the last occurrence.
+            config[field] = list(dict.fromkeys(reversed(combined)))[::-1]
     return config, path
 
 def config_digest(config):
@@ -211,7 +216,7 @@ def validate_config(config):
                     if not isinstance(api_key_command, str) or not api_key_command:
                         raise ValueError(f"role {role} candidate api_key_command must be a nonempty string")
 
-    for field in ("skill_dirs", "high_risk_paths"):
+    for field in ("skill_dirs", *PATH_BASELINES):
         if field in config:
             require_strings(config[field], field)
     if "auto_merge" in config and not isinstance(config["auto_merge"], bool):

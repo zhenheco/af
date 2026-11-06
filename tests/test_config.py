@@ -9,7 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
-from config import load_config, validate_config
+from config import config_digest, load_config, validate_config
 from gate import high_risk_paths
 
 
@@ -338,6 +338,39 @@ af.config.json""".splitlines()
         git("commit", "-qm", "representative paths")
 
         self.assertEqual(high_risk_paths(repo, patterns, base), sorted(marked))
+
+    def test_owner_approval_paths_validate_like_high_risk_paths(self):
+        validate_config({"owner_approval_paths": ["payment/", "*stripe*"]})
+        for value in ("payment/", ["payment/", 1], {"a": "b"}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_config({"owner_approval_paths": value})
+
+    def test_owner_approval_paths_inherit_from_global_with_last_occurrence_dedupe(self):
+        self.write_json(self.global_config, {"owner_approval_paths": ["payment/", "shared"]})
+        local = self.write_json(self.base / "project.json", {"owner_approval_paths": ["local/", "shared"]})
+        config, _ = load_config(local, env=self.env)
+        self.assertEqual(config["owner_approval_paths"], ["payment/", "local/", "shared"])
+
+        only_global = self.write_json(self.base / "other.json", {"auto_merge": True})
+        config, _ = load_config(only_global, env=self.env)
+        self.assertEqual(config["owner_approval_paths"], ["payment/", "shared"])
+
+    def test_invalid_global_owner_approval_paths_fail_closed(self):
+        local = self.write_json(self.base / "project.json", {"auto_merge": True})
+        for value in ("payment/", ["payment/", 1]):
+            with self.subTest(value=value):
+                self.write_json(self.global_config, {"owner_approval_paths": value})
+                with self.assertRaises(RuntimeError):
+                    load_config(local, env=self.env)
+
+    def test_config_without_owner_approval_paths_anywhere_is_unchanged(self):
+        raw = {"auto_merge": True, "high_risk_paths": ["auth/"], "tests": {"full": "true"}}
+        local = self.write_json(self.base / "project.json", raw)
+        self.write_json(self.global_config, {"high_risk_paths": ["billing/"]})
+        config, _ = load_config(local, env=self.env)
+        self.assertNotIn("owner_approval_paths", config)
+        self.assertEqual(config, {**raw, "high_risk_paths": ["billing/", "auth/"]})
+        self.assertEqual(config_digest(config), config_digest({**raw, "high_risk_paths": ["billing/", "auth/"]}))
 
 
 if __name__ == "__main__":
