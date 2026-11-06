@@ -340,6 +340,29 @@ class WorktreeCommandTests(unittest.TestCase):
         self.assertTrue(json.loads(removed.stdout)["remote_branch"].startswith("kept: "))
         self.assertEqual(git(origin, "rev-parse", "refs/heads/af/remote-race"), late)
 
+    def test_remove_does_not_delete_a_tip_that_moves_after_the_merge_proof(self):
+        origin = self.add_origin()
+        worktree, head = self.merged_flow_with_remote_branch("proof-race")
+        # B has A's tree, so the worktree stays clean while the branch moves to it.
+        git(worktree, "commit", "-q", "--allow-empty", "-m", "late")
+        late = git(worktree, "rev-parse", "HEAD")
+        git(worktree, "push", "-q", "origin", f"{late}:refs/heads/late-work")
+        git(worktree, "reset", "-q", "--hard", head)
+        real_git = shutil.which("git")
+        # The fake gh proves A merged, but advances af/proof-race to B (locally and on origin) first.
+        (self.bin / "gh").write_text(
+            "#!/bin/sh\n"
+            f"{real_git} -C {self.repo} update-ref refs/heads/af/proof-race {late}\n"
+            f"{real_git} -C {origin} update-ref refs/heads/af/proof-race {late}\n"
+            f"printf '%s' '{json.dumps({'state': 'MERGED', 'headRefOid': head})}'\n")
+
+        removed = self.remove("proof-race")
+
+        self.assertNotEqual(removed.returncode, 0)
+        self.assertIn("moved after its merge was proven", removed.stderr)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/af/proof-race"), late)
+        self.assertEqual(git(origin, "rev-parse", "refs/heads/af/proof-race"), late)
+
     def test_force_remove_never_touches_the_remote_branch(self):
         origin = self.add_origin()
         worktree = Path(json.loads(self.run_af("worktree", "create", "--repo", str(self.repo),
