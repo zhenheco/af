@@ -274,6 +274,50 @@ class WorktreeCommandTests(unittest.TestCase):
         self.assertTrue(json.loads(removed.stdout)["remote_branch"].startswith("kept: "))
         self.assertIn("af/remote-protected", self.remote_heads(origin))
 
+    def test_pushed_upstream_of_its_own_branch_is_not_a_merge_proof(self):
+        origin = self.add_origin()
+        for remote in ("origin", "mirror"):
+            with self.subTest(remote=remote):
+                flow_id = f"pushed-{remote}"
+                if remote != "origin":
+                    git(self.repo, "remote", "add", remote, str(origin))
+                worktree = Path(json.loads(self.run_af("worktree", "create", "--repo", str(self.repo),
+                                                       "--flow-id", flow_id).stdout)["path"])
+                head = self.commit_in(worktree, f"{flow_id}.txt")
+                git(worktree, "push", "-q", "-u", remote, f"af/{flow_id}")
+                self.gh_reports("OPEN", head)
+
+                removed = self.remove(flow_id)
+
+                self.assertNotEqual(removed.returncode, 0)
+                self.assertIn("not merged", removed.stderr)
+                self.assertTrue(worktree.exists())
+                self.assertEqual(git(self.repo, "branch", "--list", f"af/{flow_id}"), f"+ af/{flow_id}")
+                self.assertIn(f"af/{flow_id}", self.remote_heads(origin))
+
+    def test_remove_keeps_a_remote_branch_that_advances_between_the_check_and_the_delete(self):
+        origin = self.add_origin()
+        worktree, head = self.merged_flow_with_remote_branch("remote-race")
+        self.commit_in(worktree, "late.txt")
+        late = git(worktree, "rev-parse", "HEAD")
+        git(worktree, "push", "-q", "origin", f"{late}:refs/heads/late-work")
+        git(worktree, "reset", "-q", "--hard", head)
+        # PATH wrapper: right after ls-remote answers, someone pushes to af/remote-race.
+        real_git = shutil.which("git")
+        (self.bin / "git").write_text(
+            "#!/bin/sh\n"
+            f"{real_git} \"$@\"; code=$?\n"
+            "for arg in \"$@\"; do [ \"$arg\" = ls-remote ] && "
+            f"{real_git} -C {origin} update-ref refs/heads/af/remote-race {late}; done\n"
+            "exit $code\n")
+        (self.bin / "git").chmod(0o755)
+
+        removed = self.remove("remote-race")
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(json.loads(removed.stdout)["remote_branch"].startswith("kept: "))
+        self.assertEqual(git(origin, "rev-parse", "refs/heads/af/remote-race"), late)
+
     def test_force_remove_never_touches_the_remote_branch(self):
         origin = self.add_origin()
         worktree = Path(json.loads(self.run_af("worktree", "create", "--repo", str(self.repo),

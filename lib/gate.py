@@ -230,16 +230,41 @@ def run_gh(worktree, *args):
         return subprocess.CompletedProcess(args, 127, "", f"gh failed: {exc}")
 
 def classify_checks(rollup):
-    """Return (names of failing checks, whether any check is still pending)."""
-    failing, pending = [], False
+    """Return (names of failing checks, names of pending checks)."""
+    failing, pending = [], []
     for item in rollup:
         name = item.get("name") or item.get("context") or "unnamed check"
         if "state" in item:
             if item["state"] in ("FAILURE", "ERROR"): failing.append(name)
-            elif item["state"] in ("PENDING", "EXPECTED"): pending = True
+            elif item["state"] in ("PENDING", "EXPECTED"): pending.append(name)
         elif item.get("conclusion") in FAILING_CONCLUSIONS: failing.append(name)
-        elif item.get("status") != "COMPLETED": pending = True
+        elif item.get("status") != "COMPLETED": pending.append(name)
     return failing, pending
+
+def gh_json(worktree, *args):
+    result = run_gh(worktree, *args)
+    if result.returncode: raise RuntimeError(result.stderr.strip() or f"gh {' '.join(args[:2])} failed")
+    try:
+        return json.loads(result.stdout)
+    except ValueError as exc:
+        raise RuntimeError(f"gh {' '.join(args[:2])} returned invalid JSON: {exc}") from exc
+
+def required_checks(worktree, base):
+    """Names GitHub auto-merge waits for on the base branch (protection plus rulesets); raises when unreadable."""
+    if not base: raise RuntimeError("cannot read required checks: the pull request has no base branch")
+    branch = gh_json(worktree, "api", f"repos/{{owner}}/{{repo}}/branches/{base}")
+    rules = gh_json(worktree, "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base}")
+    if not isinstance(branch, dict) or not isinstance(rules, list):
+        raise RuntimeError("cannot read required checks: unexpected response shape")
+    protection = (branch.get("protection") or {}).get("required_status_checks") or {}
+    names = set()
+    if protection.get("enforcement_level") != "off":
+        names.update(protection.get("contexts") or [])
+        names.update(item.get("context") for item in protection.get("checks") or [] if isinstance(item, dict))
+    for rule in rules:
+        if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
+            names.update(item.get("context") for item in (rule.get("parameters") or {}).get("required_status_checks") or [])
+    return names - {None}
 
 def merge_flow(root, args):
     result, status, worktree = evaluate(root, args)
@@ -254,7 +279,7 @@ def merge_flow(root, args):
     tip = git(worktree, "rev-parse", f"refs/heads/af/{args.flow_id}").stdout.strip()
     need_pr = "push the tested tip and open the PR first"
     view = run_gh(worktree, "pr", "view", f"af/{args.flow_id}", "--json",
-                  "id,number,url,state,headRefOid,statusCheckRollup")
+                  "id,number,url,state,headRefOid,baseRefName,statusCheckRollup")
     try:
         pr = json.loads(view.stdout) if view.returncode == 0 else None
     except ValueError:
@@ -268,19 +293,36 @@ def merge_flow(root, args):
     failing, pending = classify_checks(rollup)
     if failing: return blocked(f"CI is failing: {', '.join(failing)}")
     # An empty rollup with workflow files means CI may not have registered on the PR yet.
-    pending = pending or not rollup and bool(git(worktree, "ls-tree", "-r", "--name-only", tip, "--",
-                                                 ".github/workflows/").stdout.strip())
-    if pending:
+    unregistered = not rollup and bool(git(worktree, "ls-tree", "-r", "--name-only", tip, "--",
+                                           ".github/workflows/").stdout.strip())
+    if pending or unregistered:
+        def waiting(reason):
+            return {**result, "merge": "waiting_for_ci", "reasons": [reason]}, 4
+        # GitHub auto-merge waits for required checks only; any other pending check could be skipped.
+        try:
+            required = required_checks(worktree, pr.get("baseRefName"))
+        except RuntimeError as exc:
+            return waiting(str(exc))
+        unrequired = [name for name in pending if name not in required]
+        if unrequired:
+            return waiting(f"GitHub auto-merge would not wait for these non-required checks: {', '.join(unrequired)}")
+        if unregistered and not required:
+            return waiting("CI has not registered checks and none are required")
         enabled = run_gh(worktree, "api", "graphql", "-f", f"query={AUTO_MERGE_MUTATION}",
                          "-f", f"id={pr.get('id')}", "-f", f"oid={tip}")
         if enabled.returncode:
-            return {**result, "merge": "waiting_for_ci",
-                    "reasons": [enabled.stderr.strip() or "could not enable auto-merge"]}, 4
+            return waiting(enabled.stderr.strip() or "could not enable auto-merge")
         return {**result, "merge": "auto"}, 0
     merged = run_gh(worktree, "pr", "merge", str(pr.get("number")), "--squash", "--match-head-commit", tip)
     if merged.returncode:
         return blocked(merged.stderr.strip() or "gh pr merge failed")
-    return {**result, "merge": "merged"}, 0
+    # A merge queue accepts the request without merging yet; only GitHub saying MERGED counts.
+    state = run_gh(worktree, "pr", "view", f"af/{args.flow_id}", "--json", "state")
+    try:
+        done = state.returncode == 0 and json.loads(state.stdout).get("state") == "MERGED"
+    except (ValueError, AttributeError):
+        done = False
+    return {**result, "merge": "merged" if done else "queued"}, 0
 
 def run_gate(args):
     root = repository_root(args.repo)

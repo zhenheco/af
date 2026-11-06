@@ -123,9 +123,13 @@ def merged_pull_request(target, branch):
 
 def merge_proof(repo, target, branch):
     """Return how the branch is proven merged: "ancestor", "pull-request", or None."""
+    name = git(repo, "rev-parse", "--symbolic-full-name", f"{branch}@{{upstream}}", check=False).stdout.strip()
+    # A pushed branch (push -u) tracks its own remote copy, which proves nothing about being merged.
+    own_copy = name == f"refs/heads/{branch}" or name.startswith("refs/remotes/") and name.endswith(f"/{branch}")
     base = git(repo, "rev-parse", "--verify", f"{branch}@{{upstream}}", check=False)
-    if base.returncode == 0 and git(repo, "merge-base", "--is-ancestor", f"refs/heads/{branch}",
-                                    base.stdout.strip(), check=False).returncode == 0:
+    if (not own_copy and base.returncode == 0
+            and git(repo, "merge-base", "--is-ancestor", f"refs/heads/{branch}",
+                    base.stdout.strip(), check=False).returncode == 0):
         return "ancestor"
     return "pull-request" if merged_pull_request(target, branch) else None
 
@@ -139,7 +143,8 @@ def delete_remote_branch(repo, branch, tip):
         remote = next((line.split("\t")[0] for line in listed.stdout.splitlines() if line.endswith(f"\t{ref}")), None)
         if remote is None: return "absent"
         if remote != tip: return f"kept: origin has {branch} at {remote[:12]}, not the merged tip {tip[:12]}"
-        deleted = git(repo, "push", "origin", "--delete", ref, check=False)
+        # The lease turns a push that lands after the check above into a rejection, not a lost commit.
+        deleted = git(repo, "push", f"--force-with-lease={ref}:{tip}", "origin", f":{ref}", check=False)
         return "deleted" if deleted.returncode == 0 else f"kept: {deleted.stderr.strip() or 'push failed'}"
     except (OSError, RuntimeError) as exc:
         return f"kept: {exc}"

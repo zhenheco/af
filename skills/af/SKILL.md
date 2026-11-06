@@ -7,7 +7,7 @@ description: Chain Matt Pocock skills (af-lite) in a Git worktree behind test, r
 
 Use af-lite to run an ordered Matt Pocock skill flow. The skills and worker CLIs are installed separately. af-lite creates the sibling worktree or reuses the current linked worktree, records steps, selects optional `pi`, `codex`, or `claude` workers or a host handoff, runs configured tests, scans host commits, and checks the final decision.
 
-Shell variables in the commands below: `R` is the repository (or the current worktree when reusing it), `W` is the flow worktree path that `worktree create` returns, `S` is a scratch directory outside `W` (for example `S="$(mktemp -d)"`) holding dispatch output, prompt files, and the round log, because a dirty `W` blocks `gate decide` and changes dispatch's before/after comparison. Quote every path: they may contain spaces.
+Shell variables in the commands below: `R` is the repository (or the current worktree when reusing it), `P` is the primary checkout, the repository root that holds `.git` (the same as `R` unless `R` is a linked worktree), `W` is the flow worktree path that `worktree create` returns, `S` is a scratch directory outside `W` (for example `S="$(mktemp -d)"`) holding dispatch output, prompt files, and the round log, because a dirty `W` blocks `gate decide` and changes dispatch's before/after comparison. Quote every path: they may contain spaces.
 
 ## 1. Start a flow
 
@@ -200,7 +200,7 @@ af gate decide --repo "$W" --flow-id <id> --tests pass --reviews pass
 
 For `merge` and `ask`, continue without asking:
 
-1. Push the branch: `git -C "$W" push -u origin "af/<id>"`.
+1. Push the branch: `git -C "$W" push origin "af/<id>"`. Do not use `-u`: af never treats a branch as merged because it matches its own remote copy.
 2. Open the PR with the `pr` skill (`gh pr create --base <default> --head af/<id>`). In the Claude desktop app, bind it with the `ccd_pr` tool `bind_pr`. Do not poll CI and do not schedule CI checks.
 3. Merge through the gate, the only af command that merges:
 
@@ -219,14 +219,17 @@ For `merge` and `ask`, continue without asking:
 | Result | Exit | What to do |
 |---|---|---|
 | `merged` | 0 | Clean up now. |
-| `auto` | 0 | GitHub merges after CI passes. Clean up now if possible; otherwise the sweep in section 1 does it before the next flow. |
-| `waiting_for_ci` | 4 | Report to the owner that the repository has CI but auto-merge is not allowed (it needs `allow_auto_merge` and required checks). Nothing was merged. |
+| `auto` | 0 | GitHub merges after the required checks pass. Clean up now if possible; otherwise the sweep in section 1 does it before the next flow. Read the rule below before pushing anything else to `af/<id>`. |
+| `queued` | 0 | The request was accepted but GitHub has not merged yet (merge queue). Treat it like `auto`: the sweep in section 1 cleans up. |
+| `waiting_for_ci` | 4 | Nothing was enabled or merged. Report the JSON `reasons` to the owner: auto-merge is not allowed (`allow_auto_merge`), a pending check is not required (GitHub auto-merge would not wait for it), no check is required, or the required checks could not be read. |
 | blocked or `owner` | 2 or 3 | Stop. The JSON `reasons` say why (missing PR at the tested tip, failing CI, merge refused, owner approval missing). |
+
+After `auto` or `queued`, the PR merges on its own, so do not let new commits reach it unreviewed. Before any new push to `af/<id>` (a repair round, or a fix the owner asks for), first run `gh pr merge <number> --disable-auto`. The new head then goes through tests, both reviews, `gate decide` and `gate merge` again. Auto-fix in the Claude desktop app pushes to the PR on its own, so do not turn it on for an af PR while auto-merge is enabled.
 
 Clean up after the merge:
 
 1. Complete the remaining steps with `af state complete` (the `retro` step is in section 7).
-2. From the primary checkout `P` (the repository root that holds `.git`), remove the flow worktree and branches: `af worktree remove --repo "$R" --flow-id <id>`, or sweep with `af cleanup --repo "$R" --worktrees`. With a merge proof it also deletes `origin/af/<id>` when the remote still has it at the merged tip. If removal refuses because the PR is not merged yet (`auto`), leave it for the next sweep.
+2. From the primary checkout `P`, remove the flow worktree and branches: `af worktree remove --repo "$P" --flow-id <id>`, or sweep with `af cleanup --repo "$P" --worktrees`. With a merge proof it also deletes `origin/af/<id>` when the remote still has it at the merged tip. If removal refuses because the PR is not merged yet (`auto` or `queued`), leave it for the next sweep.
 3. In `P`, when it is clean and on the default branch, run `git -C "$P" pull --ff-only`. If that fails because local main has other unpushed commits, report it; never rebase or reset. Then `git -C "$P" fetch --prune origin`.
 
 Stacked PRs (PR B based on PR A's branch):
@@ -236,7 +239,7 @@ Stacked PRs (PR B based on PR A's branch):
 - If A was squashed anyway, rebase B with `git rebase --onto origin/main <A's old tip> af/<B-id>`.
 - af's own cleanup: `af worktree remove` treats a merge-commit merge as merged by ancestry and a squash merge only via `gh pr view` `MERGED` with matching `headRefOid`.
 
-Done when the decision is recorded, the PR is open, and `gate merge` reported `merged` or `auto` (or, for `owner`, the owner has been asked); after `merged`, the worktree and branches are removed.
+Done when the decision is recorded, the PR is open, and `gate merge` reported `merged`, `auto` or `queued` (or, for `owner`, the owner has been asked); after `merged`, the worktree and branches are removed.
 
 ## 7. Retro
 
@@ -280,4 +283,4 @@ af cleanup --repo "$R"
 af cleanup --repo "$R" --worktrees
 ```
 
-Worktree removal refuses tracked changes and untracked non-ignored files. It accepts the branch as merged when it is an ancestor of the recorded base, or, for squash merges, when `gh pr view af/<id>` reports `MERGED` with `headRefOid` equal to the local branch tip; a missing `gh` or failed query refuses removal. Use `--force` only after reviewing the work. With a merge proof, removal also deletes `origin/af/<id>` when the remote branch sits at exactly the local tip (for repositories without `delete_branch_on_merge`); the result reports `remote_branch` (`deleted`, `absent`, `kept: <reason>`, or `no remote`), and `--force` never touches the remote. `af gate merge` is the only af command that merges (see section 6). A reused flow never removes the worktree: removal switches it back to the original branch and deletes `af/<id>`, and refuses a dirty worktree even with `--force`. `cleanup --worktrees` applies the same removal to completed flows, lists the ones it skipped with the reason, and keeps their records for a later retry. Cleanup archives or deletes only completed or stopped records and their logs according to `record_retention`.
+Worktree removal refuses tracked changes and untracked non-ignored files. It accepts the branch as merged when it is an ancestor of the recorded base, or, for squash merges, when `gh pr view af/<id>` reports `MERGED` with `headRefOid` equal to the local branch tip (an upstream that is the branch's own remote copy, as `push -u` creates, is never a proof); a missing `gh` or failed query refuses removal. Use `--force` only after reviewing the work. With a merge proof, removal also deletes `origin/af/<id>` when the remote branch sits at exactly the local tip (for repositories without `delete_branch_on_merge`); the result reports `remote_branch` (`deleted`, `absent`, `kept: <reason>`, or `no remote`), and `--force` never touches the remote. `af gate merge` is the only af command that merges (see section 6). A reused flow never removes the worktree: removal switches it back to the original branch and deletes `af/<id>`, and refuses a dirty worktree even with `--force`. `cleanup --worktrees` applies the same removal to completed flows, lists the ones it skipped with the reason, and keeps their records for a later retry. Cleanup archives or deletes only completed or stopped records and their logs according to `record_retention`.

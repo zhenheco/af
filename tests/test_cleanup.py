@@ -211,6 +211,22 @@ class CleanupCommandTests(unittest.TestCase):
         self.assertEqual(git(origin, "for-each-ref", "--format=%(refname:short)", "refs/heads/af/"),
                          "af/open-remote")
 
+    def test_worktrees_flag_skips_a_pushed_unmerged_flow_and_keeps_its_remote_branch(self):
+        origin = self.base / "origin.git"
+        git(self.base, "init", "-q", "--bare", str(origin))
+        git(self.repo, "remote", "add", "origin", str(origin))
+        self.fake_merged_gh()
+        worktree = self.flow_worktree("pushed-open", "complete")
+        git(worktree, "push", "-q", "-u", "origin", "af/pushed-open")
+
+        report = self.cleanup_worktrees()["worktrees"]
+
+        self.assertEqual(report["removed"], [])
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["pushed-open"])
+        self.assertTrue(worktree.exists())
+        self.assertEqual(git(origin, "for-each-ref", "--format=%(refname:short)", "refs/heads/af/"),
+                         "af/pushed-open")
+
     def test_worktrees_flag_keeps_expired_records_of_skipped_flows_for_retry(self):
         bin_dir = self.base / "bin"
         bin_dir.mkdir()
