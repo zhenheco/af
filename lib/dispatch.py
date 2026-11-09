@@ -199,7 +199,8 @@ def run_dispatch(args):
         candidate = candidates.pop(0)
         if candidate["via"] == "host":
             return emit({"via": "host", "role": args.role, "model": candidate["model"],
-                         "company": candidate["company"], "worktree": str(worktree),
+                         "company": candidate["company"], "agent": candidate.get("agent"),
+                         "worktree": str(worktree),
                          "prompt": prompt,
                          "instructions": "start a fresh subagent with this model in this worktree and give it the prompt",
                          "attempts": attempts}, 0)

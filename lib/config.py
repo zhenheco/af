@@ -185,12 +185,21 @@ def validate_config(config):
                 allowed |= {"tools", "env_allow"}
             if via == "claude":
                 allowed |= {"base_url", "api_key_command"}
+            if via == "host":
+                allowed.add("agent")
             if required is None or set(candidate) - allowed:
                 raise ValueError(f"role {role} candidate must use pi, codex, claude, or host settings")
             if any(not isinstance(candidate.get(key), str) or not candidate[key] for key in required):
                 raise ValueError(f"role {role} candidate is missing CLI settings")
             if not isinstance(candidate.get("company"), str) or not candidate["company"].strip():
                 raise ValueError(f"role {role} candidate needs a company")
+            if "agent" in candidate:
+                agent = candidate["agent"]
+                if not isinstance(agent, str) or agent not in ("claude", "codex"):
+                    raise ValueError(f"role {role} host agent must be claude or codex")
+                company = "Anthropic" if agent == "claude" else "OpenAI"
+                if candidate["company"].casefold() != company.casefold():
+                    raise ValueError(f"role {role} host agent {agent} does not match company {candidate['company']}")
             if via in ("pi", "claude") and "tools" in candidate:
                 tools = candidate["tools"]
                 if (not isinstance(tools, list) or not tools
