@@ -20,9 +20,9 @@ af state start --repo /path/to/repository-example-001 --flow-id example-001 --ba
 
 Inside a clean linked worktree that will host a single writer, such as a Claude app worktree session, use `af worktree create --repo <current worktree> --flow-id <id> --reuse-current` instead: it switches that worktree to `af/<id>` from its HEAD, records the original branch, sets the base (upstream) of `af/<id>` to origin's default branch (`refs/remotes/origin/HEAD`, else the original branch's upstream, else none), and refuses the primary checkout, a dirty worktree, or one already held by another active flow. Use sibling worktrees for parallel writers.
 
-Use the worktree path and `base_sha` returned by creation. Config resolves in this order: `--config`, `$AF_CONFIG`, `<primary checkout>/af.config.json`, `~/.config/af/af.config.json`. Any resolved config path inside a worktree on an `af/*` branch, including the primary checkout, is refused. `state start` records the resolved config path and the SHA-256 of the effective config after global `roles`, `high_risk_paths` and `owner_approval_paths` are merged in; `state advance`/`resume`, `select --flow-id`, `dispatch`, and `gate test`/`commit`/`decide`/`merge` use that path and fail closed if the effective config has changed.
+Use the worktree path and `base_sha` returned by creation. Config resolves in this order: `--config`, `$AF_CONFIG`, `<primary checkout>/af.config.json`, `~/.config/af/af.config.json`. Any resolved config path inside a worktree on an `af/*` branch, including the primary checkout, is refused. `state start` records the resolved config path and the SHA-256 of the effective config after global `roles` are inherited only when the project omits the entire `roles` key (a project `roles` map replaces the whole global map; there are no per-role overlays), and global `high_risk_paths` and `owner_approval_paths` are merged in; `state advance`/`resume`, `select --flow-id`, `dispatch`, and `gate test`/`commit`/`decide`/`merge` use that path and fail closed if the effective config has changed.
 
-Advance one step before running it. Run Matt skills in the host as appropriate; dispatch can use installed `pi`, `codex`, or `claude` CLIs or return a `host` subagent handoff. Run focused tests and host commit explicit paths before review. Use `state add-steps` to insert ordered ticket steps. Run full tests and reviews before `gate decide`. Push `af/<id>` (without `-u`), open the PR, then run `af gate merge`, the only af command that merges. `blocked` and `owner` never merge. After `auto`, run `gh pr merge <n> --disable-auto` before any new push to `af/<id>`. After `queued`, do not push to `af/<id>`: `gh pr merge --disable-auto` (gh 2.101) reports success for a queued PR without dequeuing it. If a change is needed, dequeue first with `gh api graphql -f query='mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { mergeQueueEntry { id } } }' -f id=<PR node id>` and confirm with `gh api graphql -f query='query($id: ID!) { node(id: $id) { ... on PullRequest { isInMergeQueue } } }' -f id=<PR node id>` that `isInMergeQueue` is false (the PR node id comes from `gh pr view af/<id> --json id`). The new head then goes through tests, reviews, `gate decide` and `gate merge` again; do not turn on Auto-fix for an af PR while auto-merge is enabled.
+Advance one step before running it. Run Matt skills in the host as appropriate; dispatch can use installed `pi`, `codex`, or `claude` CLIs or return a `host` handoff. Run focused tests and host commit explicit paths before review. Use `state add-steps` to insert ordered ticket steps. Run full tests and reviews before `gate decide`. Push `af/<id>` (without `-u`), open the PR, then run `af gate merge`, the only af command that merges. `blocked` and `owner` never merge. After `auto`, run `gh pr merge <n> --disable-auto` before any new push to `af/<id>`. After `queued`, do not push to `af/<id>`: `gh pr merge --disable-auto` (gh 2.101) reports success for a queued PR without dequeuing it. If a change is needed, dequeue first with `gh api graphql -f query='mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { mergeQueueEntry { id } } }' -f id=<PR node id>` and confirm with `gh api graphql -f query='query($id: ID!) { node(id: $id) { ... on PullRequest { isInMergeQueue } } }' -f id=<PR node id>` that `isInMergeQueue` is false (the PR node id comes from `gh pr view af/<id> --json id`). The new head then goes through tests, reviews, `gate decide` and `gate merge` again; do not turn on Auto-fix for an af PR while auto-merge is enabled.
 
 ```sh
 af state advance --repo /path/to/repository-example-001 --flow-id example-001
@@ -72,7 +72,7 @@ Unknown config fields are rejected. These are exactly the supported fields:
 
 | Field | Meaning |
 |---|---|
-| `roles` | Ordered candidates for each role. Each candidate uses `via` (`pi`, `codex`, `claude`, or `host`) and `company`; Pi uses `provider` plus `model`, Codex uses `profile`, Claude Code CLI uses `model`, and host uses `model`. Pi also accepts optional `tools` and `env_allow` candidate settings; Claude accepts the same, with `tools` passed as `--tools ... --permission-mode acceptEdits --strict-mcp-config`. Claude also accepts `base_url` plus `api_key_command` (both required together, `https://` only), which point the Claude CLI at another vendor's Anthropic-compatible endpoint: af then starts `claude --bare` (which skips user and project settings and hooks), runs the command for the key, passes it as `ANTHROPIC_API_KEY` with `ANTHROPIC_BASE_URL`, and removes `ANTHROPIC_AUTH_TOKEN`; a failed or empty key command fails the attempt without starting the CLI. |
+| `roles` | Ordered candidates for each role. Each candidate uses `via` (`pi`, `codex`, `claude`, or `host`) and `company`; Pi uses `provider` plus `model`, Codex uses `profile`, Claude Code CLI uses `model`, and host uses `model`. A host candidate may also set `agent` to `claude` with company `Anthropic`, or `codex` with company `OpenAI`; af validates this agent/company pair case-insensitively. Model names are opaque: the operator checks runtime availability and agent suitability, which af does not infer from the model. Omitting `agent` remains valid and dispatch returns `null`. Pi also accepts optional `tools` and `env_allow` candidate settings; Claude accepts the same, with `tools` passed as `--tools ... --permission-mode acceptEdits --strict-mcp-config`. Claude also accepts `base_url` plus `api_key_command` (both required together, `https://` only), which point the Claude CLI at another vendor's Anthropic-compatible endpoint: af then starts `claude --bare` (which skips user and project settings and hooks), runs the command for the key, passes it as `ANTHROPIC_API_KEY` with `ANTHROPIC_BASE_URL`, and removes `ANTHROPIC_AUTH_TOKEN`; a failed or empty key command fails the attempt without starting the CLI. |
 | `quota_stop.exit_statuses` | Worker exit statuses treated as quota stops; default: `[75]`. |
 | `quota_stop.patterns` | Configured case-insensitive regexes match all worker stderr after removing the prompt; none are enabled by default. Built-in patterns always match only the last 20 non-empty stderr lines after prompt removal (`usage limit`, `quota will reset`, `rate limit exceeded`, `429 too many requests`, `insufficient_quota`, `quota exceeded`). |
 | `quota_retry_minutes` | Delay to report when all candidates stop for quota; default: `15`. |
@@ -100,7 +100,46 @@ An invalid global JSON file, a non-string-array `high_risk_paths` or `owner_appr
 
 On Pi candidates, `tools` is a non-empty list passed to Pi with MCP disabled. Without a shell tool, the worker cannot run `wrangler`, `gh`, `git`, or `curl`; Pi's `write` and `edit` tools are not path-confined. On Claude candidates, `tools` removes the shell tool (the CLI is started with `--tools`, `--permission-mode acceptEdits` and `--strict-mcp-config`), but af passes no flag that turns off user or project settings or hooks, so hooks and settings `env` entries still apply, and the file tools are not confined to the worktree. `env_allow` may be empty; it keeps the standard runtime, locale, proxy, and CA variables plus listed names that are set in the parent. It removes tokens from the environment, but not credential files on disk or Pi's own credential file.
 
-`host` candidates mean the current host starts its own fresh subagent, so when the host differs from the one the config's `host` models belong to (for example, Pi or Codex with Claude models), use a config whose `host` entries match that host, or list `pi`/`codex`/`claude` reviewer candidates instead.
+`host` candidates mean the current host starts its own fresh subagent, so when the host differs from the one the config's `host` models belong to (for example, Pi or Codex with Claude models), use a config whose `host` entries match that host, or list `pi`/`codex`/`claude` reviewer candidates instead. An omitted `agent` keeps the existing native-host/CLI route; do not guess an Orca agent from the model.
+
+## Orca coordinator handoff
+
+Run the coordinator in the exact flow worktree (`$AF_WORKTREE` must be the same current W). Set the flow, task, review, writer-company, and spec-file variables for that flow; `$AF_SPEC` must be outside W. Keep each dispatch's JSON visible:
+
+```sh
+af dispatch --worktree "$AF_WORKTREE" --flow-id "$AF_FLOW_ID" \
+  --role writer --prompt "$AF_TASK"
+```
+
+Only a `via: "host"` result is an Orca handoff. Copy that result's exact `prompt` text into `$AF_SPEC` outside W; set `$AF_AGENT` and `$AF_MODEL` from the same result's explicit, non-null metadata, and confirm its `worktree` is the same W. Then run the official worker start:
+
+```sh
+orca orchestration worker-start --spec-file "$AF_SPEC" \
+  --worktree current --agent "$AF_AGENT" --model "$AF_MODEL" --json
+```
+
+The installed Orca 1.4.253 `agent-context` and `worker-start` help confirms these `worker-start` options. Agent/company pairing is validated by af; model names and availability are opaque and require operator/runtime checking. Agent-level launch, auto-release, and nesting continue to use existing Orca settings; this handoff adds no role registry. A CLI result without `via: "host"` has already run: do not start an Orca worker or treat it as a missing-handoff failure/retry. For a nonzero, quota, or timeout result, show the returned JSON and log evidence, stop and reconcile, and do not blindly retry. af's configured CLI tools, environment, timeout, and quota/failover gates remain in force.
+
+After `worker-start` returns, record its run and dispatch identifiers and END TURN. A Run does not schedule later work; the coordinator handles ready tasks when it wakes. Do not poll or watch for completion, use `--from` to impersonate another pane, or retry while ownership/result is unknown. Reconcile an ambiguous start against that same work using `orca orchestration worker-show --dispatch <dispatch-id>` or `orca orchestration worker-list --run <run-id>`; the installed Orca 1.4.253 help confirms these lookup flags.
+
+On a genuine `worker_done` wake, verify the task, dispatch identifier, and actual result, then read HEAD and status in the same W and compare them with the recorded pre-start state:
+
+```sh
+git -C "$AF_WORKTREE" rev-parse HEAD
+git -C "$AF_WORKTREE" status --short
+```
+
+Inspect the changed paths and diff. A writer must leave only task-scoped changes uncommitted; a reviewer stays read-only. If a worker committed or changed out-of-scope files, stop and reconcile manually; do not normalize commits automatically. `worker_done` is not a test, review, or gate pass. Follow the existing focused test and host commit steps before dispatching an independent reviewer; run full tests, push/PR, and merge only with the actual evidence required by the sections above. Advance or complete the flow only after recording real results.
+
+After the writer's focused test and host commit, dispatch the independent review as a separate phase, passing the writer's company so af can enforce reviewer independence. If this returns a host handoff, use the same prompt/spec and `worker-start` steps above; a reviewer remains read-only:
+
+```sh
+af dispatch --worktree "$AF_WORKTREE" --flow-id "$AF_FLOW_ID" \
+  --role small_review --writer-company "$AF_WRITER_COMPANY" \
+  --prompt "$AF_REVIEW_TASK"
+```
+
+A native smoke observed a two-stage read-only handoff and wake; it does not establish the af/Claude/release chain. The offline tests cover the af dispatch handoff JSON only and do not execute this coordinator recipe.
 
 Run `bash tests/run.sh` for the offline suite.
 

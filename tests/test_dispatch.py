@@ -602,7 +602,7 @@ class DispatchCommandTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {
             "via": "host", "role": "small_review", "model": "claude-sonnet",
-            "company": "Anthropic", "worktree": str(self.worktree),
+            "company": "Anthropic", "agent": None, "worktree": str(self.worktree),
             "prompt": "ROLE: You are the REVIEWER, started non-interactively for this worktree. "
                       "Review the requested changes only; do not edit files; do not commit; do not push; "
                       "do not ask the user.\n\nreview these changes",
@@ -610,6 +610,27 @@ class DispatchCommandTests(unittest.TestCase):
             "attempts": []})
         common = Path(git(self.worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"))
         self.assertFalse((common / ".af" / "logs" / "dispatch-001").exists())
+
+    def test_host_candidate_returns_configured_agent_through_the_public_cli(self):
+        candidate = {"via": "host", "model": "gpt-6-sol", "company": "OpenAI", "agent": "codex"}
+        self.write_config({"writer": [candidate]})
+
+        result = self.dispatch("implement the native handoff")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(result.stdout)
+        self.assertEqual(record["via"], "host")
+        self.assertEqual(record["agent"], "codex")
+        self.assertEqual(record["model"], "gpt-6-sol")
+        self.assertEqual(record["company"], "OpenAI")
+        self.assertEqual(record["worktree"], str(self.worktree))
+        self.assertEqual(record["prompt"],
+                         "ROLE: You are the WRITER, started non-interactively for this worktree. "
+                         "Implement directly here; do not dispatch another writer; do not ask the user; "
+                         "leave changes uncommitted; never push.\n\nimplement the native handoff")
+        self.assertEqual(record["attempts"], [])
+        self.assertFalse(self.pi_args_file.exists())
+        self.assertFalse(self.claude_args_file.exists())
 
     def test_no_host_dispatch_runs_the_first_cli_candidate(self):
         self.write_config({"small_review": [

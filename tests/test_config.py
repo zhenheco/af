@@ -29,6 +29,42 @@ class ConfigTests(unittest.TestCase):
         path.write_text(json.dumps(value))
         return path
 
+    def test_host_agent_accepts_known_matching_company_and_legacy_omission(self):
+        validate_config({"roles": {"writer": [{
+            "via": "host", "model": "gpt-6-sol", "company": "oPeNaI", "agent": "codex"}]}})
+        validate_config({"roles": {"writer": [{
+            "via": "host", "model": "claude-sonnet", "company": "Anthropic"}]}})
+
+    def test_host_agent_rejects_unsupported_empty_non_string_and_mismatched_values(self):
+        candidates = [
+            {"via": "host", "model": "m", "company": "OpenAI", "agent": "cursor"},
+            {"via": "host", "model": "m", "company": "OpenAI", "agent": ""},
+            {"via": "host", "model": "m", "company": "OpenAI", "agent": None},
+            {"via": "host", "model": "m", "company": "OpenAI", "agent": 7},
+            {"via": "host", "model": "m", "company": "Anthropic", "agent": "codex"},
+            {"via": "host", "model": "m", "company": "OpenAI", "agent": "claude"},
+        ]
+        for candidate in candidates:
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                validate_config({"roles": {"writer": [candidate]}})
+
+    def test_agent_is_not_allowed_on_cli_candidates(self):
+        candidate = {"via": "pi", "provider": "openai", "model": "m",
+                     "company": "OpenAI", "agent": "codex"}
+        with self.assertRaises(ValueError):
+            validate_config({"roles": {"writer": [candidate]}})
+
+    def test_existing_candidate_forms_remain_valid(self):
+        validate_config({"roles": {"writer": [
+            {"via": "pi", "provider": "openai", "model": "m", "company": "OpenAI",
+             "tools": ["read", "edit"], "env_allow": ["OPENAI_API_KEY"]},
+            {"via": "codex", "profile": "default", "company": "OpenAI"},
+            {"via": "claude", "model": "sonnet", "company": "Anthropic",
+             "tools": ["Read", "Edit"], "env_allow": ["ANTHROPIC_API_KEY"],
+             "base_url": "https://api.example.invalid", "api_key_command": "printf key"},
+            {"via": "host", "model": "claude-sonnet", "company": "Anthropic"},
+        ]}})
+
     def test_project_high_risk_patterns_still_union_with_global_baseline(self):
         self.write_json(self.global_config, {
             "high_risk_paths": ["auth/", "billing/", "shared", "shared"],
