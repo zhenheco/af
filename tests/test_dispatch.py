@@ -550,17 +550,27 @@ class DispatchCommandTests(unittest.TestCase):
         self.assertEqual([item["via"] for item in record["attempts"]], ["pi"])
 
     def test_signal_group_ignores_eperm_when_group_has_no_live_member(self):
-        with mock.patch.object(dispatch_module.os, "killpg", side_effect=PermissionError) as killpg, \
+        with mock.patch.object(dispatch_module.sys, "platform", "darwin"), \
+                mock.patch.object(dispatch_module.os, "killpg", side_effect=PermissionError) as killpg, \
                 mock.patch.object(dispatch_module, "group_has_live_member", return_value=False) as probe:
             dispatch_module.signal_group(4242, signal.SIGKILL)
         killpg.assert_called_once_with(4242, signal.SIGKILL)
         probe.assert_called_once_with(4242)
 
     def test_signal_group_surfaces_eperm_when_group_has_live_member(self):
-        with mock.patch.object(dispatch_module.os, "killpg", side_effect=PermissionError), \
+        with mock.patch.object(dispatch_module.sys, "platform", "darwin"), \
+                mock.patch.object(dispatch_module.os, "killpg", side_effect=PermissionError), \
                 mock.patch.object(dispatch_module, "group_has_live_member", return_value=True):
             with self.assertRaises(PermissionError):
                 dispatch_module.signal_group(4242, signal.SIGKILL)
+
+    def test_signal_group_surfaces_eperm_off_darwin_without_probing(self):
+        with mock.patch.object(dispatch_module.sys, "platform", "linux"), \
+                mock.patch.object(dispatch_module.os, "killpg", side_effect=PermissionError), \
+                mock.patch.object(dispatch_module, "group_has_live_member", return_value=False) as probe:
+            with self.assertRaises(PermissionError):
+                dispatch_module.signal_group(4242, signal.SIGKILL)
+        probe.assert_not_called()
 
     def test_signal_group_ignores_missing_group(self):
         with mock.patch.object(dispatch_module.os, "killpg", side_effect=ProcessLookupError):
@@ -575,6 +585,8 @@ class DispatchCommandTests(unittest.TestCase):
         with ps(" 10 Ss\n 77 Z\n 77 S+\n"):
             self.assertTrue(dispatch_module.group_has_live_member(77))
         with ps(error=subprocess.CalledProcessError(1, "ps")):
+            self.assertTrue(dispatch_module.group_has_live_member(77))
+        with ps(error=subprocess.TimeoutExpired("ps", 5)):
             self.assertTrue(dispatch_module.group_has_live_member(77))
 
     def test_signal_group_accepts_a_real_zombie_group(self):
