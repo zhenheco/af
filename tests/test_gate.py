@@ -428,11 +428,13 @@ class GateCommandTests(unittest.TestCase):
                       "printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n"
                       "case \"$1 $2\" in\n"
                       "  'pr view') out=$FAKE_GH_VIEW_OUT err=$FAKE_GH_VIEW_ERR code=${FAKE_GH_VIEW_EXIT:-0}\n"
-                      "    case \"$*\" in *' --json state') out=$FAKE_GH_STATE_OUT code=${FAKE_GH_STATE_EXIT:-0};; esac;;\n"
+                      "    case \"$*\" in *' --json state') out=$FAKE_GH_STATE_OUT code=${FAKE_GH_STATE_EXIT:-0};;\n"
+                      "      *' --json state,headRefOid') out=${FAKE_GH_PROOF_OUT-$FAKE_GH_VIEW_OUT};; esac;;\n"
                       "  'api graphql') out=$FAKE_GH_GRAPHQL_OUT err=$FAKE_GH_GRAPHQL_ERR code=${FAKE_GH_GRAPHQL_EXIT:-0};;\n"
                       "  'api repos/{owner}/{repo}/branches/'*) out=$FAKE_GH_BRANCH_OUT err=$FAKE_GH_BRANCH_ERR code=${FAKE_GH_BRANCH_EXIT:-0};;\n"
                       "  'api repos/{owner}/{repo}/rules/branches/'*) out=$FAKE_GH_RULES_OUT err=$FAKE_GH_RULES_ERR code=${FAKE_GH_RULES_EXIT:-0};;\n"
-                      "  'pr merge') out=$FAKE_GH_MERGE_OUT err=$FAKE_GH_MERGE_ERR code=${FAKE_GH_MERGE_EXIT:-0};;\n"
+                      "  'pr merge') [ -z \"$FAKE_GH_MERGE_TOUCH\" ] || touch \"$FAKE_GH_MERGE_TOUCH\"\n"
+                      "    out=$FAKE_GH_MERGE_OUT err=$FAKE_GH_MERGE_ERR code=${FAKE_GH_MERGE_EXIT:-0};;\n"
                       "  *) echo \"unexpected gh call: $*\" >&2; exit 99;;\n"
                       "esac\n"
                       "printf '%s' \"$out\"; printf '%s' \"$err\" >&2; exit \"$code\"\n")
@@ -494,7 +496,7 @@ class GateCommandTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((report["decision"], report["merge"]), ("owner", "merged"))
-        self.assertEqual(self.gh_calls()[-2], f"pr merge 7 --squash --match-head-commit {tip}")
+        self.assertEqual(self.gh_calls()[-3], f"pr merge 7 --squash --match-head-commit {tip}")
 
     def test_merge_treats_ask_as_approved_and_reports_pr_details(self):
         self.write_gate_config(high_risk_paths=["docs/"], auto_merge=False)
@@ -510,7 +512,8 @@ class GateCommandTests(unittest.TestCase):
         self.assertEqual(self.gh_calls(), [
             "pr view af/gate-merge-ask --json id,number,url,state,headRefOid,baseRefName,statusCheckRollup",
             f"pr merge 7 --squash --match-head-commit {tip}",
-            "pr view af/gate-merge-ask --json state"])
+            "pr view af/gate-merge-ask --json state",
+            "pr view af/gate-merge-ask --json state,headRefOid"])
 
     def test_merge_requires_an_open_pr_at_the_tested_tip(self):
         worktree, tip = self.merge_flow("gate-merge-pr")
@@ -708,7 +711,7 @@ class GateCommandTests(unittest.TestCase):
                 self.gh_pr(tip, rollup)
                 result, report = self.gate_merge(worktree, "gate-merge-green")
                 self.assertEqual((result.returncode, report["merge"]), (0, "merged"))
-                self.assertEqual(self.gh_calls()[-2], f"pr merge 7 --squash --match-head-commit {tip}")
+                self.assertEqual(self.gh_calls()[-3], f"pr merge 7 --squash --match-head-commit {tip}")
 
         self.env.update(FAKE_GH_MERGE_EXIT="1", FAKE_GH_MERGE_ERR="head moved")
         result, report = self.gate_merge(worktree, "gate-merge-green")
@@ -728,6 +731,86 @@ class GateCommandTests(unittest.TestCase):
                 self.assertEqual(report["merge"], "merged" if label == "merged" else "queued")
             for name in overrides: self.env.pop(name)
             self.env["FAKE_GH_STATE_OUT"] = json.dumps({"state": "MERGED"})
+
+    def merged_proof(self, tip):
+        self.env["FAKE_GH_PROOF_OUT"] = json.dumps({"state": "MERGED", "headRefOid": tip})
+
+    def test_merge_removes_the_flow_worktree_and_branch_once_merged(self):
+        worktree, tip = self.merge_flow("gate-merge-clean")
+        self.merged_proof(tip)
+
+        # Run from inside the worktree that is about to be deleted.
+        result = subprocess.run([str(ROOT / "bin" / "af"), "gate", "merge", "--repo", worktree,
+                                 "--flow-id", "gate-merge-clean", "--tests", "pass", "--reviews", "pass"],
+                                cwd=worktree, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        report = json.loads(result.stdout)
+
+        self.assertEqual((result.returncode, report["merge"]), (0, "merged"), result.stderr)
+        self.assertEqual(report["cleanup"]["removed"], True)
+        self.assertEqual(report["cleanup"]["remote_branch"], "no remote")
+        self.assertFalse(worktree.exists())
+        self.assertEqual(git(self.repo, "branch", "--list", "af/gate-merge-clean"), "")
+        self.assertEqual(self.run_af("state", "advance", "--repo", self.repo, "--flow-id", "gate-merge-clean").returncode, 0)
+        done = self.run_af("state", "complete", "--repo", self.repo, "--flow-id", "gate-merge-clean")
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_merge_keeps_the_worktree_and_still_succeeds_when_cleanup_is_refused(self):
+        worktree, tip = self.merge_flow("gate-merge-keep")
+        # No merge proof: the fake gh reports the PR still OPEN when removal asks.
+        result, report = self.gate_merge(worktree, "gate-merge-keep")
+        self.assertEqual((result.returncode, report["merge"]), (0, "merged"))
+        self.assertIn("not merged", report["cleanup"]["kept"])
+        self.assertTrue(worktree.exists())
+
+        # Work that appears after the gate evaluated is never discarded.
+        self.merged_proof(tip)
+        self.env["FAKE_GH_MERGE_TOUCH"] = str(worktree / "late.txt")
+        result, report = self.gate_merge(worktree, "gate-merge-keep")
+        self.assertEqual((result.returncode, report["merge"]), (0, "merged"))
+        self.assertIn("untracked", report["cleanup"]["kept"])
+        self.assertTrue((worktree / "late.txt").exists())
+
+    def test_merge_does_not_clean_up_unless_github_says_merged(self):
+        worktree, tip = self.merge_flow("gate-merge-nocleanup")
+        self.merged_proof(tip)
+        self.env["FAKE_GH_STATE_OUT"] = json.dumps({"state": "OPEN"})
+        result, report = self.gate_merge(worktree, "gate-merge-nocleanup")
+        self.assertEqual(report["merge"], "queued")
+        self.assertNotIn("cleanup", report)
+        self.env["FAKE_GH_STATE_OUT"] = json.dumps({"state": "MERGED"})
+        self.gh_pr(tip, [{"__typename": "CheckRun", "name": "unit", "status": "QUEUED", "conclusion": ""}])
+        self.required_checks(contexts=["unit"])
+        result, report = self.gate_merge(worktree, "gate-merge-nocleanup")
+        self.assertEqual(report["merge"], "auto")
+        self.assertNotIn("cleanup", report)
+        result, report = self.gate_merge(worktree, "gate-merge-nocleanup", tests="fail")
+        self.assertEqual(report["decision"], "blocked")
+        self.assertNotIn("cleanup", report)
+        self.assertTrue(worktree.exists())
+
+    def test_merge_on_a_reused_worktree_switches_back_and_keeps_the_folder(self):
+        app = self.base / "app"
+        git(self.repo, "worktree", "add", "-q", "-b", "feature", str(app))
+        created = self.run_af("worktree", "create", "--repo", app, "--flow-id", "gate-merge-reuse",
+                              "--reuse-current")
+        self.assertEqual(created.returncode, 0, created.stderr)
+        started = self.run_af("state", "start", "--repo", app, "--flow-id", "gate-merge-reuse",
+                              "--base-sha", git(app, "rev-parse", "HEAD"), "--config", self.config,
+                              "--chain", "tdd")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.commit_file(app, "gate-merge-reuse", "docs/notes.md")
+        self.install_gh()
+        tip = git(app, "rev-parse", "refs/heads/af/gate-merge-reuse")
+        self.gh_pr(tip)
+        self.merged_proof(tip)
+
+        result, report = self.gate_merge(app, "gate-merge-reuse")
+
+        self.assertEqual((result.returncode, report["merge"]), (0, "merged"), result.stderr)
+        self.assertEqual(report["cleanup"]["removed"], True)
+        self.assertTrue(app.exists())
+        self.assertEqual(git(app, "branch", "--show-current"), "feature")
+        self.assertEqual(git(self.repo, "branch", "--list", "af/gate-merge-reuse"), "")
 
     def test_decide_returns_exit_two_for_failed_checks_and_zero_for_merge(self):
         worktree = self.create_flow("gate-exit-status")

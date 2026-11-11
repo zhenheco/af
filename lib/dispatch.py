@@ -9,6 +9,7 @@ import re
 import secrets
 import signal
 import subprocess
+import sys
 
 from config import load_recorded_config
 from selection import REVIEW_ROLES, choose
@@ -127,6 +128,21 @@ def signal_group(process_id, signal_number):
         os.killpg(process_id, signal_number)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        # Only macOS answers EPERM for a zombie-only group (Linux succeeds); elsewhere EPERM is real, so no probe.
+        if sys.platform != "darwin" or group_has_live_member(process_id):
+            raise
+
+def group_has_live_member(process_group):
+    # Fails closed: if ps cannot answer, report a live member. Limit: a snapshot, so a member forked after it is missed.
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pgid=,stat="], check=True, text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5).stdout
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return True
+    rows = [fields for fields in (line.split() for line in listing.splitlines()) if len(fields) == 2]
+    # ps -A always lists at least itself; Apple ps can exit 0 with empty stdout when sysctl fails.
+    return not rows or any(fields[0] == str(process_group) and not fields[1].startswith("Z") for fields in rows)
 
 def quota_stop(exit_status, stderr, config, prompt):
     settings = config.get("quota_stop", {})

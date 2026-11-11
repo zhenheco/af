@@ -10,7 +10,7 @@ import tempfile
 
 from config import load_recorded_config
 from state import add_flow_args, read_record, state_path
-from worktree import common_dir, git, repository_root
+from worktree import common_dir, git, remove_flow, repository_root
 
 SECRET_PATTERNS = [
     ("private-key", re.compile(r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----")),
@@ -350,7 +350,15 @@ def merge_flow(root, args):
         done = state.returncode == 0 and json.loads(state.stdout).get("state") == "MERGED"
     except (ValueError, AttributeError):
         done = False
-    return {**result, "merge": "merged" if done else "queued"}, 0
+    if not done:
+        return {**result, "merge": "queued"}, 0
+    # The merge already happened: a refused or failed cleanup is reported, never raised, and `af cleanup --worktrees` retries it.
+    try:
+        removed = remove_flow(root, args.flow_id)
+        cleanup = {"removed": True, "remote_branch": removed["remote_branch"]}
+    except Exception as exc:
+        cleanup = {"kept": str(exc) or type(exc).__name__}
+    return {**result, "merge": "merged", "cleanup": cleanup}, 0
 
 def run_gate(args):
     root = repository_root(args.repo)
