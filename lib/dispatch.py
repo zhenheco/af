@@ -125,8 +125,22 @@ def invoke(candidate, worktree, prompt, timeout, paths):
 def signal_group(process_id, signal_number):
     try:
         os.killpg(process_id, signal_number)
-    except (ProcessLookupError, PermissionError):  # macOS: EPERM when the group holds only zombies
+    except ProcessLookupError:
         pass
+    except PermissionError:
+        # macOS answers EPERM, not ESRCH, when the group holds only zombies; any live member must surface.
+        if group_has_live_member(process_id):
+            raise
+
+def group_has_live_member(process_group):
+    # Fails closed: if ps cannot answer, report a live member. Limit: a snapshot, so a member forked after it is missed.
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pgid=,stat="], check=True, text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return True
+    return any(fields[0] == str(process_group) and not fields[1].startswith("Z")
+               for fields in (line.split() for line in listing.splitlines()) if len(fields) == 2)
 
 def quota_stop(exit_status, stderr, config, prompt):
     settings = config.get("quota_stop", {})

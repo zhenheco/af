@@ -549,10 +549,50 @@ class DispatchCommandTests(unittest.TestCase):
         self.assertEqual(len(record["worker_commits_normalized"]), 1)
         self.assertEqual([item["via"] for item in record["attempts"]], ["pi"])
 
-    def test_signal_group_ignores_a_group_that_is_only_zombies(self):
-        # macOS answers EPERM, not ESRCH, when every member of the group has already exited.
-        with mock.patch.object(dispatch_module.os, "killpg", side_effect=PermissionError):
-            dispatch_module.signal_group(1, signal.SIGKILL)
+    def test_signal_group_ignores_eperm_when_group_has_no_live_member(self):
+        with mock.patch.object(dispatch_module.os, "killpg", side_effect=PermissionError) as killpg, \
+                mock.patch.object(dispatch_module, "group_has_live_member", return_value=False) as probe:
+            dispatch_module.signal_group(4242, signal.SIGKILL)
+        killpg.assert_called_once_with(4242, signal.SIGKILL)
+        probe.assert_called_once_with(4242)
+
+    def test_signal_group_surfaces_eperm_when_group_has_live_member(self):
+        with mock.patch.object(dispatch_module.os, "killpg", side_effect=PermissionError), \
+                mock.patch.object(dispatch_module, "group_has_live_member", return_value=True):
+            with self.assertRaises(PermissionError):
+                dispatch_module.signal_group(4242, signal.SIGKILL)
+
+    def test_signal_group_ignores_missing_group(self):
+        with mock.patch.object(dispatch_module.os, "killpg", side_effect=ProcessLookupError):
+            dispatch_module.signal_group(4242, signal.SIGKILL)
+
+    def test_group_has_live_member_reads_ps_and_fails_closed(self):
+        def ps(output=None, error=None):
+            return mock.patch.object(dispatch_module.subprocess, "run", side_effect=error,
+                                     return_value=mock.Mock(stdout=output))
+        with ps(" 10 Ss\n 77 Z+\n 77 Z\n"):
+            self.assertFalse(dispatch_module.group_has_live_member(77))
+        with ps(" 10 Ss\n 77 Z\n 77 S+\n"):
+            self.assertTrue(dispatch_module.group_has_live_member(77))
+        with ps(error=subprocess.CalledProcessError(1, "ps")):
+            self.assertTrue(dispatch_module.group_has_live_member(77))
+
+    def test_signal_group_accepts_a_real_zombie_group(self):
+        # Real zombie-only group. macOS answers EPERM here (handled by the liveness probe); Linux answers
+        # success or ESRCH, so this passes there without exercising the EPERM branch.
+        child = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                state = subprocess.run(["ps", "-o", "stat=", "-p", str(child.pid)], text=True,
+                                       stdout=subprocess.PIPE).stdout.strip()
+                if state.startswith("Z"):
+                    break
+                time.sleep(0.01)
+            self.assertTrue(state.startswith("Z"), state)
+            dispatch_module.signal_group(child.pid, signal.SIGKILL)
+        finally:
+            child.wait()
 
     def test_timeout_kills_worker_process_group(self):
         # Timing is wide on purpose: the worker must get to run before the timeout, even on a loaded machine.
