@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -85,7 +86,7 @@ class DispatchCommandTests(unittest.TestCase):
                 "  ordinary-error) echo 'fatal: something broke' >&2; exit 1 ;;\n"
                 f"  prompt-echo-ordinary-error) cat {shlex.quote(str(self.pi_prompt_file))} >&2; echo 'fatal: something broke' >&2; exit 1 ;;\n"
                 "  builtin-phrase-early) echo 'reading README: built-in patterns include usage limit and quota will reset' >&2; i=0; while [ \"$i\" -lt 30 ]; do echo \"diagnostic $i\" >&2; i=$((i + 1)); done; echo 'fatal: something broke' >&2; exit 1 ;;\n"
-                "  timeout) echo touched > timeout.txt; (sleep 0.6; echo late > late.txt) & echo started; sleep 10 ;;\n"
+                "  timeout) echo touched > timeout.txt; (sleep 4; echo late > late.txt) & echo started; sleep 10 ;;\n"
                 "  stream) echo early-out; echo early-err >&2; sleep 0.5; echo final-out ;;\n"
                 "  *) echo pi-ok ;;\n"
                 "esac\n")
@@ -548,8 +549,14 @@ class DispatchCommandTests(unittest.TestCase):
         self.assertEqual(len(record["worker_commits_normalized"]), 1)
         self.assertEqual([item["via"] for item in record["attempts"]], ["pi"])
 
+    def test_signal_group_ignores_a_group_that_is_only_zombies(self):
+        # macOS answers EPERM, not ESRCH, when every member of the group has already exited.
+        with mock.patch.object(dispatch_module.os, "killpg", side_effect=PermissionError):
+            dispatch_module.signal_group(1, signal.SIGKILL)
+
     def test_timeout_kills_worker_process_group(self):
-        self.write_config(worker_timeout_minutes=0.005)
+        # Timing is wide on purpose: the worker must get to run before the timeout, even on a loaded machine.
+        self.write_config(worker_timeout_minutes=0.05)
         self.env["FAKE_PI_MODE"] = "timeout"
         result = self.dispatch()
         self.assertEqual(result.returncode, 124)
@@ -557,7 +564,7 @@ class DispatchCommandTests(unittest.TestCase):
         self.assertTrue(record["timed_out"])
         self.assertTrue(record["worktree_changed"])
         self.assertEqual(Path(record["attempts"][0]["log_paths"]["stdout"]).read_text(), "started\n")
-        time.sleep(0.35)
+        time.sleep(1.5)
         self.assertFalse((self.worktree / "late.txt").exists())
 
     def test_codex_receives_exact_writer_prompt_on_stdin(self):

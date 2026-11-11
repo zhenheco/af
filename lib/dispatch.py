@@ -125,7 +125,7 @@ def invoke(candidate, worktree, prompt, timeout, paths):
 def signal_group(process_id, signal_number):
     try:
         os.killpg(process_id, signal_number)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):  # macOS: EPERM when the group holds only zombies
         pass
 
 def quota_stop(exit_status, stderr, config, prompt):
