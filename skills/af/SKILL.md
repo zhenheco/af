@@ -218,7 +218,7 @@ For `merge` and `ask`, continue without asking:
 
 | Result | Exit | What to do |
 |---|---|---|
-| `merged` | 0 | Clean up now. |
+| `merged` | 0 | `gate merge` already removed the worktree and branches; read `cleanup` in the JSON. `cleanup.removed` is true when done; `cleanup.kept` gives the reason when it refused (dirty worktree, no merge proof), and the sweep in section 1 retries. |
 | `auto` | 0 | GitHub merges after the required checks pass. Clean up now if possible; otherwise the sweep in section 1 does it before the next flow. Read the rule below before pushing anything else to `af/<id>`. |
 | `queued` | 0 | The request was accepted but GitHub has not merged yet (merge queue). The sweep in section 1 cleans up. Do not push to `af/<id>`; read the rule below. |
 | `waiting_for_ci` | 4 | Nothing was enabled or merged. Report the JSON `reasons` to the owner: auto-merge is not allowed (`allow_auto_merge`), a pending check is not required (GitHub auto-merge would not wait for it), a pending check shares its name with another check in the rollup (the app behind a check is unknown), no check is required, or the required checks could not be read. |
@@ -229,7 +229,7 @@ After `auto` or `queued`, the PR merges on its own, so do not let new commits re
 Clean up after the merge:
 
 1. Complete the remaining steps with `af state complete` (the `retro` step is in section 7).
-2. From the primary checkout `P`, remove the flow worktree and branches: `af worktree remove --repo "$P" --flow-id <id>`, or sweep with `af cleanup --repo "$P" --worktrees`. With a merge proof it also deletes `origin/af/<id>` when the remote still has it at the merged tip. If removal refuses because the PR is not merged yet (`auto` or `queued`), leave it for the next sweep.
+2. After `merged`, `gate merge` has already removed the flow worktree and branches (same rules as `af worktree remove`, no `--force`), so run `af state complete` with `--repo "$P"`, since `$W` may be gone. Only when `cleanup` reports `kept`, or after `auto` or `queued`, remove them from the primary checkout `P`: `af worktree remove --repo "$P" --flow-id <id>`, or sweep with `af cleanup --repo "$P" --worktrees`. With a merge proof it also deletes `origin/af/<id>` when the remote still has it at the merged tip. If removal refuses because the PR is not merged yet (`auto` or `queued`), leave it for the next sweep.
 3. In `P`, when it is clean and on the default branch, run `git -C "$P" pull --ff-only`. If that fails because local main has other unpushed commits, report it; never rebase or reset. Then `git -C "$P" fetch --prune origin`.
 
 Stacked PRs (PR B based on PR A's branch):
@@ -239,7 +239,7 @@ Stacked PRs (PR B based on PR A's branch):
 - If A was squashed anyway, rebase B with `git rebase --onto origin/main <A's old tip> af/<B-id>`.
 - af's own cleanup: `af worktree remove` treats a merge-commit merge as merged by ancestry and a squash merge only via `gh pr view` `MERGED` with matching `headRefOid`.
 
-Done when the decision is recorded, the PR is open, and `gate merge` reported `merged`, `auto` or `queued` (or, for `owner`, the owner has been asked); after `merged`, the worktree and branches are removed.
+Done when the decision is recorded, the PR is open, and `gate merge` reported `merged`, `auto` or `queued` (or, for `owner`, the owner has been asked); after `merged`, `cleanup` reports the worktree and branches removed or why they were kept.
 
 ## 7. Retro
 
