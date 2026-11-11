@@ -246,7 +246,7 @@ Done when the decision is recorded, the PR is open, and `gate merge` reported `m
 The `retro` skill has `disable-model-invocation: true`, so the Skill tool refuses it inside a flow. The host completes the step by reading the `retro` `SKILL.md` from the skill directory `doctor` searched (the config's `skill_dirs`; default `~/.claude/skills`, `~/.agents/skills`, `<repo>/skills`; for Claude Code usually `~/.claude/skills/retro/SKILL.md`) with the Read tool and following its steps against the flow's session, then:
 
 ```sh
-af state complete --repo "$W" --flow-id <id> --result completed
+af state complete --repo "$P" --flow-id <id> --result completed
 ```
 
 If retro proposals need edits, they go through a writer like any other change.

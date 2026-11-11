@@ -68,6 +68,12 @@ class SkillCommandContractTests(unittest.TestCase):
         self.assertIn("--suite", flattened)
         self.assertIn("--writer-company", flattened)
 
+    def test_post_merge_state_commands_use_primary_checkout(self):
+        skill = (ROOT / "skills" / "af" / "SKILL.md").read_text()
+        retro = skill.split("## 7. Retro", 1)[1].split("## Reference", 1)[0]
+        self.assertIn('af state complete --repo "$P"', retro)
+        self.assertNotIn('--repo "$W"', retro)
+
     def test_cleanup_documentation_matches_supported_command(self):
         skill = (ROOT / "skills" / "af" / "SKILL.md").read_text()
         self.assertIn('af cleanup --repo "$R"', skill)
