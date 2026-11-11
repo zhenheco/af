@@ -580,10 +580,15 @@ class DispatchCommandTests(unittest.TestCase):
         def ps(output=None, error=None):
             return mock.patch.object(dispatch_module.subprocess, "run", side_effect=error,
                                      return_value=mock.Mock(stdout=output))
-        with ps(" 10 Ss\n 77 Z+\n 77 Z\n"):
+        with ps(" 10 Ss\n 77 Z+\n 77 Z\n") as run:
             self.assertFalse(dispatch_module.group_has_live_member(77))
+        self.assertGreater(run.call_args.kwargs["timeout"], 0)
         with ps(" 10 Ss\n 77 Z\n 77 S+\n"):
             self.assertTrue(dispatch_module.group_has_live_member(77))
+        # Apple ps can print an error, exit 0 and emit nothing; ps -A always lists at least itself.
+        for unusable in ("", "  \n\n", "garbage\n 1 2 3\n"):
+            with ps(unusable):
+                self.assertTrue(dispatch_module.group_has_live_member(77), repr(unusable))
         with ps(error=subprocess.CalledProcessError(1, "ps")):
             self.assertTrue(dispatch_module.group_has_live_member(77))
         with ps(error=subprocess.TimeoutExpired("ps", 5)):
@@ -597,7 +602,7 @@ class DispatchCommandTests(unittest.TestCase):
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 state = subprocess.run(["ps", "-o", "stat=", "-p", str(child.pid)], text=True,
-                                       stdout=subprocess.PIPE).stdout.strip()
+                                       stdout=subprocess.PIPE, timeout=5).stdout.strip()
                 if state.startswith("Z"):
                     break
                 time.sleep(0.01)

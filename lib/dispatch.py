@@ -140,8 +140,9 @@ def group_has_live_member(process_group):
                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5).stdout
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return True
-    return any(fields[0] == str(process_group) and not fields[1].startswith("Z")
-               for fields in (line.split() for line in listing.splitlines()) if len(fields) == 2)
+    rows = [fields for fields in (line.split() for line in listing.splitlines()) if len(fields) == 2]
+    # ps -A always lists at least itself; Apple ps can exit 0 with empty stdout when sysctl fails.
+    return not rows or any(fields[0] == str(process_group) and not fields[1].startswith("Z") for fields in rows)
 
 def quota_stop(exit_status, stderr, config, prompt):
     settings = config.get("quota_stop", {})
