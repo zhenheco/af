@@ -1,4 +1,4 @@
-"""Resolve and validate the supported af-lite config fields."""
+"""Resolve and validate the supported af config fields."""
 
 import hashlib
 import json

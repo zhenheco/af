@@ -1,10 +1,10 @@
-# af-lite
+# af
 
-af-lite chains [Matt Pocock's skills](https://github.com/mattpocock/skills) in a sibling Git worktree or the current linked worktree. It is POSIX bash plus Python 3 standard library; the upstream skills and worker CLIs remain separately installed.
+af chains [Matt Pocock's skills](https://github.com/mattpocock/skills) in a sibling Git worktree or the current linked worktree. It is POSIX bash plus Python 3 standard library; the upstream skills and worker CLIs remain separately installed.
 
 ## Design
 
-Workers are trusted but fallible: they are the owner's coding agents working on the owner's repositories. af-lite protects against mistakes: working outside the flow worktree, committing unintended files, committing secrets, same-company review, merging untested or high-risk changes, and losing work during failover. Deliberately malicious-worker defenses such as hook injection, symlink escapes, FIFO/socket traps, and crafted encodings are out of scope; worker CLI sandboxes and human review cover that threat.
+Workers are trusted but fallible: they are the owner's coding agents working on the owner's repositories. af protects against mistakes: working outside the flow worktree, committing unintended files, committing secrets, same-company review, merging untested or high-risk changes, and losing work during failover. Deliberately malicious-worker defenses such as hook injection, symlink escapes, FIFO/socket traps, and crafted encodings are out of scope; worker CLI sandboxes and human review cover that threat.
 
 The flow is explicit: create a worktree, record and advance skill steps, select and dispatch an available worker when useful, run configured tests, commit explicit paths through the gate, review, and request a merge decision. Workers receive a fixed role preamble and the task on stdin. A worker commit is soft-reset to its starting commit; quota failover is allowed only when both HEAD and `git status --porcelain=v1 -z --ignored` are unchanged. Worker output is logged under `<git-common-dir>/.af/logs/<flow-id>/`.
 
@@ -47,7 +47,7 @@ Worktree removal refuses tracked changes and untracked non-ignored files. A bran
 Schedulers do not start in the repository, so pass `--repo` and `--config` explicitly. For cron:
 
 ```cron
-17 3 * * * /path/to/af-lite/bin/af cleanup --repo /path/to/repository --config /path/to/repository/af.config.json
+17 3 * * * /path/to/af/bin/af cleanup --repo /path/to/repository --config /path/to/repository/af.config.json
 ```
 
 For launchd, add these keys to a LaunchAgent plist:
@@ -55,7 +55,7 @@ For launchd, add these keys to a LaunchAgent plist:
 ```xml
 <key>ProgramArguments</key>
 <array>
-  <string>/path/to/af-lite/bin/af</string>
+  <string>/path/to/af/bin/af</string>
   <string>cleanup</string>
   <string>--repo</string>
   <string>/path/to/repository</string>
@@ -90,7 +90,7 @@ Unknown config fields are rejected. These are exactly the supported fields:
 
 ### Global role defaults
 
-When a project config omits `roles`, af-lite inherits the role map from `$HOME/.config/af/af.config.json`. If the project config contains `roles`, its entire map is used, including an empty map; role entries are never merged individually. Other global fields are not inherited. If the selected config has no requested role, role-using commands such as `af select` fail with `role not configured: <role>`. An invalid global role map used as the fallback fails closed as an invalid global config.
+When a project config omits `roles`, af inherits the role map from `$HOME/.config/af/af.config.json`. If the project config contains `roles`, its entire map is used, including an empty map; role entries are never merged individually. Other global fields are not inherited. If the selected config has no requested role, role-using commands such as `af select` fail with `role not configured: <role>`. An invalid global role map used as the fallback fails closed as an invalid global config.
 
 ### Global high-risk baseline
 
@@ -145,4 +145,4 @@ Run `bash tests/run.sh` for the offline suite.
 
 ## Credits and license
 
-af-lite builds on [Matt Pocock's skills](https://github.com/mattpocock/skills), used under their MIT license. af-lite is also distributed under the MIT license; see [LICENSE](LICENSE).
+af builds on [Matt Pocock's skills](https://github.com/mattpocock/skills), used under their MIT license. af is also distributed under the MIT license; see [LICENSE](LICENSE).

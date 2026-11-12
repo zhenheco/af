@@ -1,6 +1,6 @@
-# Install af-lite
+# Install af
 
-af-lite provides the `af` command and one host skill. Matt Pocock's skills and the worker CLIs are installed separately.
+af provides the `af` command and one host skill. Matt Pocock's skills and the worker CLIs are installed separately.
 
 ## Link the skill and install the command
 
@@ -8,13 +8,13 @@ For Claude Code:
 
 ```sh
 mkdir -p ~/.claude/skills
-ln -s /path/to/af-lite/skills/af ~/.claude/skills/af
+ln -s /path/to/af/skills/af ~/.claude/skills/af
 ```
 
 Link `skills/af` into the skill directory for another Agent Skills host. To put `af` on `PATH`, either add the `bin` directory:
 
 ```sh
-export PATH="/path/to/af-lite/bin:$PATH"
+export PATH="/path/to/af/bin:$PATH"
 af --help
 ```
 
@@ -22,7 +22,7 @@ Or install the command as a symlink:
 
 ```sh
 mkdir -p ~/.local/bin
-ln -s /path/to/af-lite/bin/af ~/.local/bin/af
+ln -s /path/to/af/bin/af ~/.local/bin/af
 export PATH="$HOME/.local/bin:$PATH"
 af --help
 ```
@@ -38,7 +38,7 @@ Run `/setup-matt-pocock-skills` once in each target repository. `af doctor` warn
 Copy the example to the primary checkout root and configure worker candidates, test commands, risk paths, and retention:
 
 ```sh
-cp /path/to/af-lite/af.config.example.json ./af.config.json
+cp /path/to/af/af.config.example.json ./af.config.json
 af doctor --repo .
 ```
 
