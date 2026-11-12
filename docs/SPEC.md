@@ -1,10 +1,10 @@
-# af-lite specification
+# af specification
 
-af-lite chains separately installed [Matt Pocock skills](https://github.com/mattpocock/skills) using POSIX bash and Python 3 standard library. It owns flow worktrees and records, candidate selection and dispatch, test and commit gates, cleanup, and a merge decision. It does not implement the skills or replace project CI and release processes.
+af chains separately installed [Matt Pocock skills](https://github.com/mattpocock/skills) using POSIX bash and Python 3 standard library. It owns flow worktrees and records, candidate selection and dispatch, test and commit gates, cleanup, and a merge decision. It does not implement the skills or replace project CI and release processes.
 
 ## Threat model
 
-Workers are trusted but fallible: they are the owner's coding agents working in the owner's repositories. af-lite protects against mistakes: work outside the flow worktree, unintended commits, secrets in commits, same-company reviews, untested or high-risk merges, and lost work during failover. Deliberately malicious-worker defenses are out of scope, including hook injection, symlink escapes, FIFO/socket traps, and crafted encodings. Worker CLI sandboxes and human review cover that threat.
+Workers are trusted but fallible: they are the owner's coding agents working in the owner's repositories. af protects against mistakes: work outside the flow worktree, unintended commits, secrets in commits, same-company reviews, untested or high-risk merges, and lost work during failover. Deliberately malicious-worker defenses are out of scope, including hook injection, symlink escapes, FIFO/socket traps, and crafted encodings. Worker CLI sandboxes and human review cover that threat.
 
 ## Flow and worktree
 

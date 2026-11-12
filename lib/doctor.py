@@ -62,7 +62,7 @@ def check(args):
     return report
 
 def add_doctor_parser(commands):
-    parser = commands.add_parser("doctor", help="check af-lite prerequisites")
+    parser = commands.add_parser("doctor", help="check af prerequisites")
     parser.add_argument("--repo", default=".")
     parser.add_argument("--config")
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small command dispatcher for af-lite helpers."""
+"""Small command dispatcher for af helpers."""
 
 import argparse
 import sys

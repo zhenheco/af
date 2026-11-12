@@ -1,11 +1,11 @@
 ---
 name: af
-description: Chain Matt Pocock skills (af-lite) in a Git worktree behind test, review, and commit gates. Use to start a flow, dispatch writers and reviewers, run repair rounds and the merge decision, or clean up flows.
+description: Chain Matt Pocock skills in a Git worktree behind test, review, and commit gates. Use to start a flow, dispatch writers and reviewers, run repair rounds and the merge decision, or clean up flows.
 ---
 
 # af
 
-Use af-lite to run an ordered Matt Pocock skill flow. The skills and worker CLIs are installed separately. af-lite creates the sibling worktree or reuses the current linked worktree, records steps, selects optional `pi`, `codex`, or `claude` workers or a host handoff, runs configured tests, scans host commits, and checks the final decision.
+Use af to run an ordered Matt Pocock skill flow. The skills and worker CLIs are installed separately. af creates the sibling worktree or reuses the current linked worktree, records steps, selects optional `pi`, `codex`, or `claude` workers or a host handoff, runs configured tests, scans host commits, and checks the final decision.
 
 Shell variables in the commands below: `R` is the repository (or the current worktree when reusing it), `P` is the primary checkout, the repository root that holds `.git` (the same as `R` unless `R` is a linked worktree), `W` is the flow worktree path that `worktree create` returns, `S` is a scratch directory outside `W` (for example `S="$(mktemp -d)"`) holding dispatch output, prompt files, and the round log, because a dirty `W` blocks `gate decide` and changes dispatch's before/after comparison. Quote every path: they may contain spaces.
 
@@ -141,7 +141,7 @@ python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(open(d.get("r
 
 Check `via` first. When `via` is `host`, the fresh subagent's reply is the report, and a `report_path` (if present) belongs to an earlier failed CLI attempt (a host handoff after quota failover carries those attempts), not to the review.
 
-Parallel reviews: in af-lite versions after e62b82f, each attempt gets its own log files (pid plus a random token, created exclusively), so two read-only review dispatches for the same flow may run in parallel:
+Parallel reviews: in af versions after e62b82f, each attempt gets its own log files (pid plus a random token, created exclusively), so two read-only review dispatches for the same flow may run in parallel:
 
 ```sh
 af dispatch --worktree "$W" --flow-id <id> --role <review-role> --writer-company <writer-company> --prompt "$(cat "$S/review-standards.md")" > "$S/review-1.json" & p1=$!
@@ -153,7 +153,7 @@ echo "review statuses: $s1 $s2"
 
 A bare `wait` returns 0 and hides a failed review, and a bare `wait "$p1"; s1=$?` exits under `set -e` on a failure before `s1=$?` runs (hence `|| s1=$?`). Check each status before reading its report: 0 ok, 75 `waiting_for_quota` (wait `retry_after_minutes`, redispatch that review), 124 timeout, anything else a failure (read the JSON and its `.err.log`, then redispatch).
 
-Older af-lite (e62b82f and before) gave two simultaneous dispatches the same log path and their reports interleaved: on those versions, or when unsure of the version, run reviews one after another. A review never runs alongside a writer dispatch (Step 2).
+Older af (e62b82f and before) gave two simultaneous dispatches the same log path and their reports interleaved: on those versions, or when unsure of the version, run reviews one after another. A review never runs alongside a writer dispatch (Step 2).
 
 Done when every report is read and its findings are listed.
 
