@@ -106,18 +106,42 @@ def worktree_listed(repo, flow_id, record=None):
             return True
     return False
 
-def close_active_flow(repo, flow_id, tip=None):
-    """Mark a flow proven merged as complete; False when the record or branch changed meanwhile.
+class _Keep(Exception):
+    """Raised inside the record lock so a flow that must stay as it is is not rewritten."""
 
-    Closing is only a record edit: nothing is deleted here, removal stays with the completed-flow path."""
-    with edit_flow(repo, flow_id) as (_, record):
-        if record.get("status") != "active": return False
-        # Holding the lock, look once more: the branch must still be at the proven tip (or still absent).
-        found = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/af/{flow_id}", check=False)
-        if tip is None and found.returncode != 1: return False
-        if tip is not None and found.stdout.strip() != tip: return False
-        record.update({"status": "complete", "closed_by_cleanup_at": now()})
-    return True
+def closing_blocker(repo, flow_id, record, tip):
+    """None when the flow may be closed now; otherwise why not ('' = leave it silently, nothing to report).
+
+    Every closing condition lives here and is evaluated with the record lock held, right before the write."""
+    if record.get("status") != "active": return ""
+    found = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/af/{flow_id}", check=False)
+    if tip is None:  # branch gone: closable only while no worktree of the flow is registered
+        if found.returncode != 1: return ""
+        return "merged, but its worktree still exists; review it" if worktree_listed(repo, flow_id, record) else None
+    if found.stdout.strip() != tip: return ""
+    target = flow_worktree(repo, flow_id)
+    if target is None:
+        # A worktree registered but not on the flow branch (e.g. detached): report it; none registered: nothing to review.
+        return "merged, but its worktree is not on the flow branch; review it" if worktree_listed(repo, flow_id, record) else ""
+    if git(target, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout:
+        return "merged, but its worktree has changes; review it"
+    if git(target, "rev-parse", "HEAD", check=False).stdout.strip() != tip:
+        return "merged, but its worktree HEAD differs from the merged tip; review it"
+    return None
+
+def close_active_flow(repo, flow_id, tip=None):
+    """Mark a flow proven merged as complete; None when closed, else the reason it was not ('' = silent).
+
+    Closing is only a record edit: nothing is deleted here, removal stays with the completed-flow path.
+    Remaining window by nature: a change made after the in-lock check and before the record is written."""
+    try:
+        with edit_flow(repo, flow_id) as (_, record):
+            blocker = closing_blocker(repo, flow_id, record, tip)
+            if blocker is not None: raise _Keep(blocker)
+            record.update({"status": "complete", "closed_by_cleanup_at": now()})
+    except _Keep as keep:
+        return str(keep)
+    return None
 
 def cleanup_worktrees(repo):
     removed, skipped, closed = [], [], []
@@ -138,11 +162,11 @@ def cleanup_worktrees(repo):
         # Exit 1 means the branch is gone because an earlier run removed it; other failures are errors.
         if lookup.returncode == 1:
             if status == "active" and merged_branch_pull_request(repo, f"af/{path.stem}"):
-                if worktree_listed(repo, path.stem, record):
-                    skipped.append({"flow_id": path.stem,
-                                    "reason": "merged, but its worktree still exists; review it"})
-                elif close_active_flow(repo, path.stem):
+                blocker = close_active_flow(repo, path.stem)
+                if blocker is None:
                     closed.append(path.stem)
+                elif blocker:
+                    skipped.append({"flow_id": path.stem, "reason": blocker})
             continue
         if lookup.returncode:
             if status == "complete":
@@ -153,21 +177,10 @@ def cleanup_worktrees(repo):
             tip = git(repo, "rev-parse", f"refs/heads/af/{path.stem}", check=False).stdout.strip()
             if not tip or not merged_pull_request(repo, f"af/{path.stem}", tip):
                 continue
-            # Same worktree and clean rule as remove_flow; checked after the proof so a change made meanwhile is seen.
-            target = flow_worktree(repo, path.stem)
-            if target is None:
-                # A worktree is registered but not on the flow branch (e.g. detached): report it; none registered: nothing to review.
-                if worktree_listed(repo, path.stem, record):
-                    skipped.append({"flow_id": path.stem,
-                                    "reason": "merged, but its worktree is not on the flow branch; review it"})
-                continue
-            if git(target, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout:
-                skipped.append({"flow_id": path.stem, "reason": "merged, but its worktree has changes; review it"})
-                continue
-            if git(target, "rev-parse", "HEAD", check=False).stdout.strip() != tip:
-                skipped.append({"flow_id": path.stem, "reason": "merged, but its worktree HEAD differs from the merged tip; review it"})
-                continue
-            if not close_active_flow(repo, path.stem, tip):
+            # Same worktree and clean rule as remove_flow, decided under the record lock after the proof.
+            blocker = close_active_flow(repo, path.stem, tip)
+            if blocker is not None:
+                if blocker: skipped.append({"flow_id": path.stem, "reason": blocker})
                 continue
             closed.append(path.stem)
         try:

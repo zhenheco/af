@@ -5,11 +5,17 @@ import shutil
 from pathlib import Path
 import subprocess
 import tempfile
+import sys
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
+import cleanup as cleanup_module
+from state import edit_flow
+from worktree import flow_path
 
 
 def git(cwd, *args):
@@ -440,6 +446,35 @@ class CleanupCommandTests(unittest.TestCase):
         report = self.cleanup_worktrees()["worktrees"]
         self.assertEqual(report["closed"], ["gone-merged"])
         self.assertEqual(self.record_status("gone-merged")["status"], "complete")
+
+    def cleanup_with_change_while_waiting(self, change):
+        """Run cleanup in-process; `change` happens after the pre-lock work, just before the record lock is taken."""
+        def edit_after_change(repo, flow_id):
+            change()
+            return edit_flow(repo, flow_id)
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(cleanup_module, "edit_flow", edit_after_change):
+            return cleanup_module.cleanup_worktrees(self.repo)
+
+    def test_a_file_added_while_cleanup_waits_for_the_lock_keeps_the_flow_active(self):
+        self.fake_merged_gh("af/late-file")
+        worktree = self.flow_worktree("late-file", "active")
+        report = self.cleanup_with_change_while_waiting(lambda: (worktree / "late.txt").write_text("keep me\n"))
+        self.assertEqual((report["closed"], report["removed"]), ([], []))
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["late-file"])
+        self.assertIn("has changes", report["skipped"][0]["reason"])
+        self.assertEqual(self.record_status("late-file")["status"], "active")
+        self.assertEqual((worktree / "late.txt").read_text(), "keep me\n")
+
+    def test_a_worktree_registered_while_cleanup_waits_keeps_a_gone_branch_flow_active(self):
+        self.gone_branch_gh("MERGED", "af/late-wt")
+        self.active_flow_with_branch_gone("late-wt")
+        target = flow_path(self.repo, "late-wt")
+        report = self.cleanup_with_change_while_waiting(
+            lambda: git(self.repo, "worktree", "add", "-q", "--detach", str(target)))
+        self.assertEqual(report["closed"], [])
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["late-wt"])
+        self.assertIn("worktree still exists", report["skipped"][0]["reason"])
+        self.assertEqual(self.record_status("late-wt")["status"], "active")
 
     def test_worktrees_flag_does_not_close_a_gone_branch_flow_with_a_leftover_worktree(self):
         self.gone_branch_gh("MERGED", "af/gone-wt")
