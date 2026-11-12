@@ -121,6 +121,17 @@ def merged_pull_request(target, branch, tip):
     return (isinstance(report, dict) and report.get("state") == "MERGED"
             and report.get("headRefOid") == tip)
 
+def merged_branch_pull_request(repo, branch):
+    """True only when GitHub reports a MERGED pull request whose head branch is exactly this one."""
+    try:
+        result = subprocess.run(["gh", "pr", "view", branch, "--json", "state,headRefName"], cwd=repo,
+                                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        report = json.loads(result.stdout) if result.returncode == 0 else {}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    return (isinstance(report, dict) and report.get("state") == "MERGED"
+            and report.get("headRefName") == branch)
+
 def merge_proof(repo, target, branch, tip):
     """Return how the tip is proven merged: "ancestor", "pull-request", or None."""
     # A pushed branch (push -u) tracks a branch of its own name on some remote (or "."); that copy proves
