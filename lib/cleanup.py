@@ -153,6 +153,10 @@ def cleanup_worktrees(repo):
             # Same worktree and clean rule as remove_flow; checked after the proof so a change made meanwhile is seen.
             target = flow_worktree(repo, path.stem)
             if target is None:
+                # A worktree is registered but not on the flow branch (e.g. detached): report it; none registered: nothing to review.
+                if worktree_listed(repo, path.stem):
+                    skipped.append({"flow_id": path.stem,
+                                    "reason": "merged, but its worktree is not on the flow branch; review it"})
                 continue
             if git(target, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout:
                 skipped.append({"flow_id": path.stem, "reason": "merged, but its worktree has changes; review it"})

@@ -289,14 +289,34 @@ class CleanupCommandTests(unittest.TestCase):
     def test_worktrees_flag_closes_and_removes_an_active_flow_proven_merged(self):
         self.fake_merged_gh("af/merged-active")
         worktree = self.flow_worktree("merged-active", "active")
+        tip = git(self.repo, "rev-parse", "refs/heads/af/merged-active")  # the commit is the PR-merged tip (fake gh reports it)
         report = self.cleanup_worktrees()["worktrees"]
         self.assertEqual(report["closed"], ["merged-active"])
         self.assertEqual(report["removed"], ["merged-active"])
         self.assertFalse(worktree.exists())
         self.assertEqual(git(self.repo, "branch", "--list", "af/merged-active"), "")
+        # Not asserted: reachability. A merged-and-removed branch keeps no ref by design; cleanup only does not prune the object.
+        git(self.repo, "cat-file", "-e", f"{tip}^{{commit}}")
         record = self.record_status("merged-active")
         self.assertEqual(record["status"], "complete")
         self.assertIn("closed_by_cleanup_at", record)
+
+    def test_worktrees_flag_skips_a_merged_active_flow_whose_worktree_is_detached(self):
+        self.fake_merged_gh("af/merged-detached")
+        worktree = self.flow_worktree("merged-detached", "active")
+        (worktree / "scratch.txt").write_text("uncommitted\n")
+        git(worktree, "checkout", "-q", "--detach", "HEAD~1")
+        before = (self.flows / "merged-detached.json").read_text()
+        head = git(worktree, "rev-parse", "HEAD")
+        tip = git(self.repo, "rev-parse", "refs/heads/af/merged-detached")
+        report = self.cleanup_worktrees()["worktrees"]
+        self.assertEqual((report["closed"], report["removed"]), ([], []))
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["merged-detached"])
+        self.assertIn("not on the flow branch", report["skipped"][0]["reason"])
+        self.assertTrue((worktree / "scratch.txt").exists())
+        self.assertEqual(git(worktree, "rev-parse", "HEAD"), head)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/af/merged-detached"), tip)
+        self.assertEqual((self.flows / "merged-detached.json").read_text(), before)
 
     def test_worktrees_flag_leaves_an_unmerged_active_flow_untouched(self):
         self.fake_merged_gh()
