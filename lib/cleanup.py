@@ -8,8 +8,8 @@ import shutil
 
 from config import load_config
 from state import edit_flow, flow_records_directory, now
-from worktree import (common_dir, git, merged_branch_pull_request, merged_pull_request, primary_checkout,
-                      remove_flow, validate_flow_id)
+from worktree import (common_dir, flow_path, git, git_output, merged_branch_pull_request, merged_pull_request,
+                      primary_checkout, remove_flow, reused_from, validate_flow_id)
 
 def record_age(record, now):
     try:
@@ -79,13 +79,40 @@ def cleanup_records(repo, config, keep=()):
         moved.append(path.stem)
     return {"moved": moved, "deleted": deleted}
 
-def close_active_flow(repo, flow_id):
-    """Mark a flow proven merged as complete; False when the record changed meanwhile."""
+def flow_worktree(repo, flow_id):
+    """The worktree remove_flow would act on for this flow, or None when none is registered on its branch."""
+    branch = f"af/{flow_id}"
+    original = reused_from(repo, branch)
+    entries = [dict(line.partition(" ")[::2] for line in block.splitlines() if line)
+               for block in git_output(repo, "worktree", "list", "--porcelain").split("\n\n")]
+    if original is None:
+        target = flow_path(Path(repo), flow_id)
+        entry = next((item for item in entries if Path(item.get("worktree", "")).resolve() == target.resolve()), None)
+    else:
+        entry = next((item for item in entries if item.get("branch") == f"refs/heads/{branch}"), None)
+        target = Path(entry["worktree"]) if entry else None
+    return target if entry and entry.get("branch") == f"refs/heads/{branch}" else None
+
+def worktree_listed(repo, flow_id):
+    """True when any registered worktree is the flow's sibling path or sits on its branch."""
+    target = flow_path(Path(repo), flow_id).resolve()
+    branch = f"refs/heads/af/{flow_id}"
+    for block in git_output(repo, "worktree", "list", "--porcelain").split("\n\n"):
+        entry = dict(line.partition(" ")[::2] for line in block.splitlines() if line)
+        if Path(entry.get("worktree", "")).resolve() == target or entry.get("branch") == branch:
+            return True
+    return False
+
+def close_active_flow(repo, flow_id, tip=None):
+    """Mark a flow proven merged as complete; False when the record or branch changed meanwhile.
+
+    Closing is only a record edit: nothing is deleted here, removal stays with the completed-flow path."""
     with edit_flow(repo, flow_id) as (_, record):
         if record.get("status") != "active": return False
-        # The branch may have been recreated since the caller saw it gone; holding the lock, look once more.
-        if git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/af/{flow_id}", check=False).returncode != 1:
-            return False
+        # Holding the lock, look once more: the branch must still be at the proven tip (or still absent).
+        found = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/af/{flow_id}", check=False)
+        if tip is None and found.returncode != 1: return False
+        if tip is not None and found.stdout.strip() != tip: return False
         record.update({"status": "complete", "closed_by_cleanup_at": now()})
     return True
 
@@ -107,30 +134,42 @@ def cleanup_worktrees(repo):
         lookup = git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/af/{path.stem}", check=False)
         # Exit 1 means the branch is gone because an earlier run removed it; other failures are errors.
         if lookup.returncode == 1:
-            if status == "active" and merged_branch_pull_request(repo, f"af/{path.stem}") \
-                    and close_active_flow(repo, path.stem):
-                closed.append(path.stem)
+            if status == "active" and merged_branch_pull_request(repo, f"af/{path.stem}"):
+                if worktree_listed(repo, path.stem):
+                    skipped.append({"flow_id": path.stem,
+                                    "reason": "merged, but its worktree still exists; review it"})
+                elif close_active_flow(repo, path.stem):
+                    closed.append(path.stem)
             continue
         if lookup.returncode:
             if status == "complete":
                 skipped.append({"flow_id": path.stem, "reason": lookup.stderr.strip() or "cannot read flow branch"})
             continue
-        expected_tip = None
         if status == "active":
             # Ancestry proves nothing for a live flow (a fresh branch sits at its base): require a MERGED PR at the tip.
             tip = git(repo, "rev-parse", f"refs/heads/af/{path.stem}", check=False).stdout.strip()
             if not tip or not merged_pull_request(repo, f"af/{path.stem}", tip):
                 continue
-            expected_tip = tip
+            # Same worktree and clean rule as remove_flow; checked after the proof so a change made meanwhile is seen.
+            target = flow_worktree(repo, path.stem)
+            if target is None:
+                continue
+            if git(target, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout:
+                skipped.append({"flow_id": path.stem, "reason": "merged, but its worktree has changes; review it"})
+                continue
+            if git(target, "rev-parse", "HEAD", check=False).stdout.strip() != tip:
+                skipped.append({"flow_id": path.stem, "reason": "merged, but its worktree HEAD differs from the merged tip; review it"})
+                continue
+            if not close_active_flow(repo, path.stem, tip):
+                continue
+            closed.append(path.stem)
         try:
-            remove_flow(repo, path.stem, expected_tip=expected_tip)
+            remove_flow(repo, path.stem)
         except RuntimeError as exc:
             # A merged flow that cannot be removed (for example a dirty worktree) stays as it is, reported to the owner.
             skipped.append({"flow_id": path.stem, "reason": str(exc)})
             continue
         removed.append(path.stem)
-        if status == "active" and close_active_flow(repo, path.stem):
-            closed.append(path.stem)
     return {"removed": removed, "skipped": skipped, "closed": closed}
 
 def add_cleanup_parser(commands):
@@ -138,7 +177,7 @@ def add_cleanup_parser(commands):
     parser.add_argument("--repo", required=True)
     parser.add_argument("--config")
     parser.add_argument("--worktrees", action="store_true",
-                        help="also remove worktrees and branches of flows proven merged, and close active flows whose merge is proven")
+                        help="also remove worktrees and branches of completed flows proven merged; an active flow with a MERGED pull request and a clean worktree is closed first, then removed the same way")
 
 def run_cleanup(args):
     config, _ = load_config(args.config, cwd=args.repo, require=bool(args.config))

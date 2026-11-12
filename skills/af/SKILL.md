@@ -32,7 +32,7 @@ Shell variables in the commands below: `R` is the repository (or the current wor
    git -C "$R" fetch --prune origin
    ```
 
-   The sweep removes completed flows, and closes then removes active flows, whose merge is proven (an active flow only on a MERGED pull request); read `worktrees.closed` and `worktrees.skipped` and report both to the owner. It never touches dirty or unmerged flows. Skip the fetch when the repository has no `origin`.
+   The sweep removes completed flows, and closes then removes active flows whose merge is proven (an active flow only on a MERGED pull request, with its worktree clean and at the merged tip; cleanup only closes the record, the normal removal does the deleting); read `worktrees.closed` and `worktrees.skipped` and report both to the owner. It never touches dirty or unmerged flows. Skip the fetch when the repository has no `origin`.
 
 3. Create a unique flow ID. Keep the returned worktree `path` (this is `W`) and `base_sha`.
 
