@@ -7,8 +7,9 @@ from pathlib import Path
 import shutil
 
 from config import load_config
-from state import flow_records_directory
-from worktree import common_dir, git, primary_checkout, remove_flow, validate_flow_id
+from state import edit_flow, flow_records_directory, now
+from worktree import (common_dir, git, merged_branch_pull_request, merged_pull_request, primary_checkout,
+                      remove_flow, validate_flow_id)
 
 def record_age(record, now):
     try:
@@ -78,15 +79,24 @@ def cleanup_records(repo, config, keep=()):
         moved.append(path.stem)
     return {"moved": moved, "deleted": deleted}
 
+def close_active_flow(repo, flow_id):
+    """Mark a flow proven merged as complete; False when the record changed meanwhile."""
+    with edit_flow(repo, flow_id) as (_, record):
+        if record.get("status") != "active": return False
+        record.update({"status": "complete", "closed_by_cleanup_at": now()})
+    return True
+
 def cleanup_worktrees(repo):
-    removed, skipped = [], []
+    removed, skipped, closed = [], [], []
     for path in sorted(flow_records_directory(repo).glob("*.json")):
         try:
             record = json.loads(path.read_text())
             validate_flow_id(path.stem)
         except (OSError, ValueError):
             continue
-        if not isinstance(record, dict) or record.get("status") != "complete":
+        # Active flows are closed only on a merge proof; stopped flows keep their old handling.
+        status = record.get("status") if isinstance(record, dict) else None
+        if status not in ("complete", "active"):
             continue
         if record.get("flow_id") != path.stem:
             skipped.append({"flow_id": path.stem, "reason": "flow record id does not match its filename"})
@@ -94,23 +104,36 @@ def cleanup_worktrees(repo):
         lookup = git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/af/{path.stem}", check=False)
         # Exit 1 means the branch is gone because an earlier run removed it; other failures are errors.
         if lookup.returncode == 1:
+            if status == "active" and merged_branch_pull_request(repo, f"af/{path.stem}") \
+                    and close_active_flow(repo, path.stem):
+                closed.append(path.stem)
             continue
         if lookup.returncode:
-            skipped.append({"flow_id": path.stem, "reason": lookup.stderr.strip() or "cannot read flow branch"})
+            if status == "complete":
+                skipped.append({"flow_id": path.stem, "reason": lookup.stderr.strip() or "cannot read flow branch"})
             continue
+        if status == "active":
+            # Ancestry proves nothing for a live flow (a fresh branch sits at its base): require a MERGED PR at the tip.
+            tip = git(repo, "rev-parse", f"refs/heads/af/{path.stem}", check=False).stdout.strip()
+            if not tip or not merged_pull_request(repo, f"af/{path.stem}", tip):
+                continue
         try:
             remove_flow(repo, path.stem)
-            removed.append(path.stem)
         except RuntimeError as exc:
+            # A merged flow that cannot be removed (for example a dirty worktree) stays as it is, reported to the owner.
             skipped.append({"flow_id": path.stem, "reason": str(exc)})
-    return {"removed": removed, "skipped": skipped}
+            continue
+        removed.append(path.stem)
+        if status == "active" and close_active_flow(repo, path.stem):
+            closed.append(path.stem)
+    return {"removed": removed, "skipped": skipped, "closed": closed}
 
 def add_cleanup_parser(commands):
     parser = commands.add_parser("cleanup", help="archive and expire completed flows")
     parser.add_argument("--repo", required=True)
     parser.add_argument("--config")
     parser.add_argument("--worktrees", action="store_true",
-                        help="also remove worktrees and branches of completed flows proven merged")
+                        help="also remove worktrees and branches of flows proven merged, and close active flows whose merge is proven")
 
 def run_cleanup(args):
     config, _ = load_config(args.config, cwd=args.repo, require=bool(args.config))
