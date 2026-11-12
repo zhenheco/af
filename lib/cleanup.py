@@ -93,13 +93,16 @@ def flow_worktree(repo, flow_id):
         target = Path(entry["worktree"]) if entry else None
     return target if entry and entry.get("branch") == f"refs/heads/{branch}" else None
 
-def worktree_listed(repo, flow_id):
-    """True when any registered worktree is the flow's sibling path or sits on its branch."""
-    target = flow_path(Path(repo), flow_id).resolve()
+def worktree_listed(repo, flow_id, record=None):
+    """True when any registered worktree is the flow's sibling path, the record's own worktree path, or sits on its branch."""
+    targets = {flow_path(Path(repo), flow_id).resolve()}
+    recorded = record.get("worktree_path") if isinstance(record, dict) else None
+    if isinstance(recorded, str) and recorded:  # a --reuse-current flow lives at a non-sibling path
+        targets.add(Path(recorded).resolve())
     branch = f"refs/heads/af/{flow_id}"
     for block in git_output(repo, "worktree", "list", "--porcelain").split("\n\n"):
         entry = dict(line.partition(" ")[::2] for line in block.splitlines() if line)
-        if Path(entry.get("worktree", "")).resolve() == target or entry.get("branch") == branch:
+        if Path(entry.get("worktree", "")).resolve() in targets or entry.get("branch") == branch:
             return True
     return False
 
@@ -135,7 +138,7 @@ def cleanup_worktrees(repo):
         # Exit 1 means the branch is gone because an earlier run removed it; other failures are errors.
         if lookup.returncode == 1:
             if status == "active" and merged_branch_pull_request(repo, f"af/{path.stem}"):
-                if worktree_listed(repo, path.stem):
+                if worktree_listed(repo, path.stem, record):
                     skipped.append({"flow_id": path.stem,
                                     "reason": "merged, but its worktree still exists; review it"})
                 elif close_active_flow(repo, path.stem):
@@ -154,7 +157,7 @@ def cleanup_worktrees(repo):
             target = flow_worktree(repo, path.stem)
             if target is None:
                 # A worktree is registered but not on the flow branch (e.g. detached): report it; none registered: nothing to review.
-                if worktree_listed(repo, path.stem):
+                if worktree_listed(repo, path.stem, record):
                     skipped.append({"flow_id": path.stem,
                                     "reason": "merged, but its worktree is not on the flow branch; review it"})
                 continue

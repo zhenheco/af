@@ -164,7 +164,7 @@ Done when the commit exists on `af/<id>` and the step is marked completed.
 The host decides the tier before the review step (definitions in `rules/hard-rules.md` rule 5, owner 2026-11-12). A diff matching `high_risk_paths` is HIGH and cannot be downgraded; the host may only raise a tier. An unclear tier is MEDIUM. The tier chooses the step:
 
 - **HIGH**: two parallel `big_review`/`small_review` dispatches (standards, behavior) with `--writer-company` set to the author's company, as below. At the milestone the two executions may both be Codex `sol`; cross-company means different from the author's company.
-- **MEDIUM**: ONE `small_review` dispatch with `--writer-company`, with a single prompt covering standards and behavior; run it once before merge. af's selection picks the reviewer and it may be another company. Outside af a MEDIUM reviewer may be a fresh-context subagent of the writer's company; inside an af flow a same-company reviewer is not available until af supports a review role for it.
+- **MEDIUM**: ONE `small_review` dispatch with `--writer-company`, with a single prompt covering standards and behavior; run it once before merge. af's selection picks the reviewer and it may be another company. Outside af a MEDIUM reviewer may be a fresh-context subagent of the writer's company; inside an af flow the shipped config has no review role whose candidates all share the writer's company, so the MEDIUM reviewer is whoever `small_review` selects.
 - **LOW**: no dispatch. The host reads the `base_sha...HEAD` diff and records that in the round log.
 
 `--reviews pass` in `gate decide`/`gate merge` means the tier's requirement above was met.

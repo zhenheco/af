@@ -455,6 +455,40 @@ class CleanupCommandTests(unittest.TestCase):
         self.assertTrue((worktree / "scratch.txt").exists())
         self.assertEqual(self.record_status("gone-wt")["status"], "active")
 
+    def detached_reused_flow(self, flow_id):
+        """An active flow made with --reuse-current, then detached: neither the sibling path nor on the flow branch."""
+        app = self.base / f"app-{flow_id}"
+        git(self.repo, "worktree", "add", "-q", "-b", f"feature-{flow_id}", str(app))
+        created = self.run_af("worktree", "create", "--repo", str(app), "--flow-id", flow_id, "--reuse-current")
+        self.assertEqual(created.returncode, 0, created.stderr)
+        started = self.run_af("state", "start", "--repo", str(app), "--flow-id", flow_id,
+                              "--base-sha", git(app, "rev-parse", "HEAD"), "--config", str(self.config),
+                              "--chain", "tdd")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        (app / "scratch.txt").write_text("uncommitted\n")
+        git(app, "checkout", "-q", "--detach")
+        return app
+
+    def test_worktrees_flag_skips_a_merged_flow_whose_reused_worktree_was_detached(self):
+        self.fake_merged_gh("af/reuse-kept")
+        app = self.detached_reused_flow("reuse-kept")
+        report = self.cleanup_worktrees()["worktrees"]
+        self.assertEqual((report["closed"], report["removed"]), ([], []))
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["reuse-kept"])
+        self.assertTrue((app / "scratch.txt").exists())
+        self.assertEqual(self.record_status("reuse-kept")["status"], "active")
+
+    def test_worktrees_flag_does_not_close_a_gone_branch_flow_whose_reused_worktree_is_listed(self):
+        self.gone_branch_gh("MERGED", "af/reuse-gone")
+        app = self.detached_reused_flow("reuse-gone")
+        git(self.repo, "branch", "-D", "af/reuse-gone")
+        report = self.cleanup_worktrees()["worktrees"]
+        self.assertEqual((report["closed"], report["removed"]), ([], []))
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["reuse-gone"])
+        self.assertIn("worktree still exists", report["skipped"][0]["reason"])
+        self.assertTrue((app / "scratch.txt").exists())
+        self.assertEqual(self.record_status("reuse-gone")["status"], "active")
+
     def test_worktrees_flag_keeps_an_active_flow_whose_pr_lookup_does_not_prove_a_merge(self):
         for flow_id, state, head in (("gone-open", "OPEN", "af/gone-open"),
                                      ("gone-closed", "CLOSED", "af/gone-closed"),
