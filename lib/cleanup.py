@@ -83,6 +83,9 @@ def close_active_flow(repo, flow_id):
     """Mark a flow proven merged as complete; False when the record changed meanwhile."""
     with edit_flow(repo, flow_id) as (_, record):
         if record.get("status") != "active": return False
+        # The branch may have been recreated since the caller saw it gone; holding the lock, look once more.
+        if git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/af/{flow_id}", check=False).returncode != 1:
+            return False
         record.update({"status": "complete", "closed_by_cleanup_at": now()})
     return True
 

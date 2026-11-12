@@ -202,13 +202,25 @@ def remove_flow(repo_arg, flow_id, force=False, expected_tip=None):
         raise RuntimeError("flow branch is not merged into its base and no merged pull request has the same head; "
                            "use --force after reviewing it")
 
+    ref = f"refs/heads/{branch}"
+    def delete_branch():
+        # Compare-and-delete: fails if the ref moved, so a tip advanced after the proof is never lost.
+        if git(repo, "update-ref", "-d", ref, tip, check=False).returncode:
+            raise RuntimeError(f"{branch} moved after its merge was proven; review it")
+    if expected_tip is not None:
+        # The PR proof ran after the tip was read, so this atomic delete is what decides: it comes before anything is removed.
+        delete_branch()
+        # The worktree's HEAD now names an unborn branch (its files would read as staged additions and block a plain
+        # worktree remove); detach it at the proven tip, then let the normal checks refuse a worktree that changed.
+        if git(repo, "rev-parse", "--verify", "--quiet", ref, check=False).returncode == 0:
+            raise RuntimeError(f"{branch} was recreated after its merge was proven; review it")
+        git(target, "update-ref", "--no-deref", "HEAD", tip)
     if original is None:
         git(repo, "worktree", "remove", *(["--force"] if force else []), str(target))
     else:
         git(target, "switch", "-q", *([original] if original else ["--detach", tip]))
-    # Compare-and-delete: fails if the ref moved, so a tip advanced after the proof is never lost.
-    if git(repo, "update-ref", "-d", f"refs/heads/{branch}", tip, check=False).returncode:
-        raise RuntimeError(f"{branch} moved after its merge was proven; review it")
+    if expected_tip is None:
+        delete_branch()
     git(repo, "config", "--remove-section", f"branch.{branch}", check=False)
     # Only a removal backed by a merge proof may touch the remote.
     remote = "kept: --force removals never touch the remote" if force else delete_remote_branch(repo, branch, tip)

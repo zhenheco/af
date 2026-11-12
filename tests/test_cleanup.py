@@ -360,6 +360,56 @@ class CleanupCommandTests(unittest.TestCase):
         self.assertTrue(worktree.exists())
         self.assertEqual(self.record_status("raced")["status"], "active")
 
+    def second_call_gh(self, proven, action):
+        # First gh call (cleanup's own proof) is clean; the second (inside remove_flow) runs `action` after answering.
+        bin_dir = self.base / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / "gh").write_text(
+            "#!/bin/sh\n"
+            f"printf '{{\"state\":\"MERGED\",\"headRefOid\":\"%s\"}}' {proven}\n"
+            f"[ -e '{self.base}/seen' ] || {{ touch '{self.base}/seen'; exit 0; }}\n"
+            f"{action}\n")
+        (bin_dir / "gh").chmod(0o755)
+        self.env["PATH"] = f"{bin_dir}{os.pathsep}{self.env['PATH']}"
+
+    def test_worktrees_flag_keeps_the_worktree_when_the_branch_moves_during_the_second_proof(self):
+        worktree = self.flow_worktree("late-commit", "active")
+        proven = git(self.repo, "rev-parse", "refs/heads/af/late-commit")
+        self.second_call_gh(proven, f"git -C '{worktree}' commit -q --allow-empty -m late")
+        report = self.cleanup_worktrees()["worktrees"]
+        late = git(self.repo, "rev-parse", "refs/heads/af/late-commit")
+        self.assertNotEqual(late, proven)
+        self.assertEqual((report["closed"], report["removed"]), ([], []))
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["late-commit"])
+        self.assertTrue(worktree.exists())
+        self.assertEqual(git(worktree, "rev-parse", "HEAD"), late)
+        self.assertEqual(self.record_status("late-commit")["status"], "active")
+
+    def test_worktrees_flag_refuses_a_worktree_that_turns_dirty_after_the_branch_is_deleted(self):
+        worktree = self.flow_worktree("late-dirty", "active")
+        proven = git(self.repo, "rev-parse", "refs/heads/af/late-dirty")
+        self.second_call_gh(proven, f"echo x > '{worktree}/scratch.txt'")
+        report = self.cleanup_worktrees()["worktrees"]
+        self.assertEqual((report["closed"], report["removed"]), ([], []))
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["late-dirty"])
+        self.assertTrue((worktree / "scratch.txt").exists())
+        self.assertEqual(git(worktree, "rev-parse", "HEAD"), proven)
+        self.assertEqual(self.record_status("late-dirty")["status"], "active")
+
+    def test_worktrees_flag_does_not_close_a_flow_whose_branch_reappears_during_the_lookup(self):
+        self.active_flow_with_branch_gone("gone-race")
+        bin_dir = self.base / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / "gh").write_text("#!/bin/sh\n"
+                                    "printf '{\"state\":\"MERGED\",\"headRefName\":\"af/gone-race\"}'\n"
+                                    f"git -C '{self.repo}' branch af/gone-race HEAD\n")
+        (bin_dir / "gh").chmod(0o755)
+        self.env["PATH"] = f"{bin_dir}{os.pathsep}{self.env['PATH']}"
+        report = self.cleanup_worktrees()["worktrees"]
+        self.assertEqual(report["closed"], [])
+        self.assertIn("af/gone-race", git(self.repo, "branch", "--list", "af/gone-race"))
+        self.assertEqual(self.record_status("gone-race")["status"], "active")
+
     def test_worktrees_flag_reports_a_merged_active_flow_that_cannot_be_removed(self):
         self.fake_merged_gh("af/merged-dirty")
         worktree = self.flow_worktree("merged-dirty", "active")
