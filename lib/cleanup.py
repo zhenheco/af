@@ -112,13 +112,15 @@ def cleanup_worktrees(repo):
             if status == "complete":
                 skipped.append({"flow_id": path.stem, "reason": lookup.stderr.strip() or "cannot read flow branch"})
             continue
+        expected_tip = None
         if status == "active":
             # Ancestry proves nothing for a live flow (a fresh branch sits at its base): require a MERGED PR at the tip.
             tip = git(repo, "rev-parse", f"refs/heads/af/{path.stem}", check=False).stdout.strip()
             if not tip or not merged_pull_request(repo, f"af/{path.stem}", tip):
                 continue
+            expected_tip = tip
         try:
-            remove_flow(repo, path.stem)
+            remove_flow(repo, path.stem, expected_tip=expected_tip)
         except RuntimeError as exc:
             # A merged flow that cannot be removed (for example a dirty worktree) stays as it is, reported to the owner.
             skipped.append({"flow_id": path.stem, "reason": str(exc)})

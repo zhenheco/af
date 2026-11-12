@@ -162,7 +162,8 @@ def delete_remote_branch(repo, branch, tip):
     except (OSError, RuntimeError) as exc:
         return f"kept: {exc}"
 
-def remove_flow(repo_arg, flow_id, force=False):
+def remove_flow(repo_arg, flow_id, force=False, expected_tip=None):
+    """expected_tip binds the removal to a tip already proven by a MERGED pull request; ancestry is not accepted then."""
     validate_flow_id(flow_id)
     repo = primary_checkout(repo_arg)
     branch = f"af/{flow_id}"
@@ -191,7 +192,12 @@ def remove_flow(repo_arg, flow_id, force=False):
                            + ("" if original is not None else " or use --force"))
     # Read the tip once: the proof, the local delete and the remote lease are all bound to this SHA.
     tip = git_output(repo, "rev-parse", f"refs/heads/{branch}")
-    proof = None if force else merge_proof(repo, target, branch, tip)
+    if expected_tip is not None and tip != expected_tip:
+        raise RuntimeError(f"{branch} moved after its merge was proven; review it")
+    if expected_tip is not None:
+        proof = "pull-request" if merged_pull_request(target, branch, tip) else None
+    else:
+        proof = None if force else merge_proof(repo, target, branch, tip)
     if not force and not proof:
         raise RuntimeError("flow branch is not merged into its base and no merged pull request has the same head; "
                            "use --force after reviewing it")

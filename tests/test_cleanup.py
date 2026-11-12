@@ -336,6 +336,30 @@ class CleanupCommandTests(unittest.TestCase):
         git(self.repo, "merge", "--ff-only", "af/ff-local")
         self.assert_flow_untouched("ff-local", worktree, (self.flows / "ff-local.json").read_text())
 
+    def test_worktrees_flag_refuses_an_active_flow_whose_tip_moved_after_the_pr_proof(self):
+        # gh proves tip T merged, then another process commits U on the branch and fast-forwards main to U.
+        worktree = self.flow_worktree("raced", "active")
+        proven = git(self.repo, "rev-parse", "refs/heads/af/raced")
+        bin_dir = self.base / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / "gh").write_text(
+            "#!/bin/sh\n"
+            f"printf '{{\"state\":\"MERGED\",\"headRefOid\":\"%s\"}}' {proven}\n"
+            f"[ -e '{self.base}/raced' ] && exit 0\n"
+            f"touch '{self.base}/raced'\n"
+            f"git -C '{worktree}' commit -q --allow-empty -m late\n"
+            f"git -C '{self.repo}' merge -q --ff-only af/raced\n")
+        (bin_dir / "gh").chmod(0o755)
+        self.env["PATH"] = f"{bin_dir}{os.pathsep}{self.env['PATH']}"
+        report = self.cleanup_worktrees()["worktrees"]
+        late = git(self.repo, "rev-parse", "refs/heads/af/raced")
+        self.assertNotEqual(late, proven)
+        self.assertEqual((report["closed"], report["removed"]), ([], []))
+        self.assertEqual([item["flow_id"] for item in report["skipped"]], ["raced"])
+        self.assertIn("moved", report["skipped"][0]["reason"])
+        self.assertTrue(worktree.exists())
+        self.assertEqual(self.record_status("raced")["status"], "active")
+
     def test_worktrees_flag_reports_a_merged_active_flow_that_cannot_be_removed(self):
         self.fake_merged_gh("af/merged-dirty")
         worktree = self.flow_worktree("merged-dirty", "active")
