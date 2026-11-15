@@ -128,6 +128,13 @@ def load_config(explicit=None, cwd=None, env=None, require=True):
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"invalid global config {global_config_path(env)}: {exc}") from exc
         config["roles"] = global_config["roles"]
+    if "quota_ceiling_percent" not in config and global_config is not None \
+            and "quota_ceiling_percent" in global_config:
+        try:
+            validate_config({"quota_ceiling_percent": global_config["quota_ceiling_percent"]})
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid global config {global_config_path(env)}: {exc}") from exc
+        config["quota_ceiling_percent"] = global_config["quota_ceiling_percent"]
     for field in PATH_BASELINES:
         baseline = None if global_config is None else global_config.get(field)
         if baseline is not None:
@@ -137,7 +144,7 @@ def load_config(explicit=None, cwd=None, env=None, require=True):
     return config, path
 
 def config_digest(config):
-    # Hash the merged result so inherited global roles and high_risk_paths are covered too.
+    # Hash the merged result so inherited global roles, quota_ceiling_percent and high_risk_paths are covered too.
     return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 
 def load_recorded_config(record, cwd):
