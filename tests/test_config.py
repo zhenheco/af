@@ -129,6 +129,55 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config["roles"], {})
 
+    def test_project_inherits_global_quota_ceiling_percent_when_omitted(self):
+        self.write_json(self.global_config, {"quota_ceiling_percent": 80})
+        local = self.write_json(self.base / "project.json", {"auto_merge": True})
+
+        config, _ = load_config(local, env=self.env)
+
+        self.assertEqual(config["quota_ceiling_percent"], 80)
+
+    def test_project_quota_ceiling_percent_overrides_global(self):
+        self.write_json(self.global_config, {"quota_ceiling_percent": 80})
+        local = self.write_json(self.base / "project.json", {"quota_ceiling_percent": 50})
+
+        config, _ = load_config(local, env=self.env)
+
+        self.assertEqual(config["quota_ceiling_percent"], 50)
+
+    def test_no_quota_ceiling_percent_anywhere_stays_absent(self):
+        self.write_json(self.global_config, {"auto_merge": True})
+        local = self.write_json(self.base / "project.json", {"auto_merge": True})
+
+        config, _ = load_config(local, env=self.env)
+
+        self.assertNotIn("quota_ceiling_percent", config)
+
+    def test_global_quota_ceiling_percent_change_changes_digest(self):
+        local = self.write_json(self.base / "project.json", {"auto_merge": True})
+        self.write_json(self.global_config, {"quota_ceiling_percent": 80})
+        first, _ = load_config(local, env=self.env)
+        self.write_json(self.global_config, {"quota_ceiling_percent": 70})
+        second, _ = load_config(local, env=self.env)
+
+        self.assertNotEqual(config_digest(first), config_digest(second))
+
+    def test_explicit_global_config_path_is_unchanged_by_quota_inheritance(self):
+        self.write_json(self.global_config, {"quota_ceiling_percent": 80})
+
+        config, _ = load_config(self.global_config, env=self.env)
+
+        self.assertEqual(config, {"quota_ceiling_percent": 80})
+
+    def test_invalid_global_quota_ceiling_percent_fails_closed_for_project(self):
+        self.write_json(self.global_config, {"quota_ceiling_percent": 0})
+        local = self.write_json(self.base / "project.json", {"auto_merge": True})
+
+        with self.assertRaises(RuntimeError) as caught:
+            load_config(local, env=self.env)
+
+        self.assertTrue(str(caught.exception).startswith("invalid global config"))
+
     def test_merge_keeps_a_single_copy_of_patterns_duplicated_across_configs(self):
         self.write_json(self.global_config, {"high_risk_paths": ["billing/"]})
         local = self.write_json(self.base / "project.json", {"high_risk_paths": ["billing/"]})
