@@ -2,7 +2,7 @@
   "roles": {
     "writer": [
       {"via": "pi", "provider": "example-provider", "model": "example-writer", "company": "Writer Co"},
-      {"via": "codex", "profile": "example-profile", "company": "Writer Co"}
+      {"via": "codex", "profile": "example-profile", "company": "Writer Co", "quota_provider": "codex", "quota_windows": ["5 hours", "7 days"]}
     ],
     "small_review": [
       {"via": "host", "model": "claude-sonnet", "company": "Anthropic"}
@@ -21,6 +21,7 @@
       "usage limit reached"
     ]
   },
+  "quota_ceiling_percent": 80,
   "quota_retry_minutes": 15,
   "worker_timeout_minutes": 60,
   "test_timeout_minutes": 30,

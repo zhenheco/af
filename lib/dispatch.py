@@ -202,6 +202,10 @@ def run_dispatch(args):
     config = load_recorded_config(record, worktree)
 
     selection = choose(args.role, config, args.writer_company)
+    if selection.get("quota_ceiling_reached"):
+        return emit({"status": "waiting_for_quota", "role": args.role,
+                     "retry_after_minutes": config.get("quota_retry_minutes", 15),
+                     "attempts": [], **selection}, 75)
     if not selection["selected"]:
         return emit({"status": "error", "attempts": [], **selection}, 2)
 

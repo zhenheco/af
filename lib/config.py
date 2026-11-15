@@ -9,7 +9,7 @@ import re
 import stat
 import subprocess
 
-FIELDS = {"roles", "quota_stop", "quota_retry_minutes",
+FIELDS = {"roles", "quota_stop", "quota_ceiling_percent", "quota_retry_minutes",
           "worker_timeout_minutes", "test_timeout_minutes", "stale_after_minutes",
           "skill_dirs", "auto_merge", "high_risk_paths", "owner_approval_paths", "tests", "record_retention"}
 
@@ -180,7 +180,7 @@ def validate_config(config):
                 raise ValueError(f"role {role} candidate must be an object")
             via = candidate.get("via")
             required = settings.get(via)
-            allowed = required | {"via", "company"} if required is not None else set()
+            allowed = required | {"via", "company", "quota_provider", "quota_windows"} if required is not None else set()
             if via in ("pi", "claude"):
                 allowed |= {"tools", "env_allow"}
             if via == "claude":
@@ -193,6 +193,14 @@ def validate_config(config):
                 raise ValueError(f"role {role} candidate is missing CLI settings")
             if not isinstance(candidate.get("company"), str) or not candidate["company"].strip():
                 raise ValueError(f"role {role} candidate needs a company")
+            if "quota_provider" in candidate and (
+                    not isinstance(candidate["quota_provider"], str) or not candidate["quota_provider"]):
+                raise ValueError(f"role {role} candidate quota_provider must be a nonempty string")
+            if "quota_windows" in candidate:
+                windows = candidate["quota_windows"]
+                if (not isinstance(windows, list) or not windows
+                        or any(not isinstance(name, str) or not name for name in windows)):
+                    raise ValueError(f"role {role} candidate quota_windows must be a nonempty array of nonempty strings")
             if "agent" in candidate:
                 agent = candidate["agent"]
                 if not isinstance(agent, str) or agent not in ("claude", "codex"):
@@ -235,6 +243,12 @@ def validate_config(config):
         require_number(config.get(field), field, 0)
     for field in ("stale_after_minutes", "quota_retry_minutes"):
         require_number(config.get(field), field, 0, integer=True)
+
+    if "quota_ceiling_percent" in config:
+        ceiling = config["quota_ceiling_percent"]
+        require_number(ceiling, "quota_ceiling_percent", 0)
+        if ceiling is None or ceiling > 100:
+            raise ValueError("quota_ceiling_percent must be a number above 0 and at most 100")
 
     quota = require_object(config.get("quota_stop", {}), "quota_stop", {"exit_statuses", "patterns"})
     statuses = quota.get("exit_statuses", [75])
