@@ -521,6 +521,25 @@ class DispatchCommandTests(unittest.TestCase):
             with self.subTest(candidate=candidate), self.assertRaises(ValueError):
                 validate_config({"roles": {"writer": [candidate]}})
 
+    def test_quota_ceiling_reached_returns_waiting_for_quota_exit_75(self):
+        import test_quota_ceiling as q
+        server = q.Server({"data": [{"provider": "codex", "windows": [{"name": "5 hours", "used": 95, "remaining": 5}]}]})
+        self.addCleanup(server.close)
+        self.write_config(roles={"writer": [
+            {"via": "codex", "profile": "p", "company": "OpenAI", "quota_provider": "codex"}]},
+            quota_ceiling_percent=80, quota_retry_minutes=7)
+        env = dict(self.env, AF_QUOTA_URL=server.url)
+        result = self.dispatch(env=env)
+        self.assertEqual(result.returncode, 75, result.stderr)
+        record = json.loads(result.stdout)
+        self.assertEqual(record["status"], "waiting_for_quota")
+        self.assertEqual(record["retry_after_minutes"], 7)
+        self.assertEqual(record["attempts"], [])
+        self.assertTrue(record["quota_ceiling_reached"])
+        selected = self.run_af("select", "--repo", self.worktree, "--flow-id", "dispatch-001",
+                               "--role", "writer", env=env)
+        self.assertEqual(selected.returncode, 2)
+
     def test_quota_failover_runs_next_worker_when_head_and_status_are_unchanged(self):
         self.env["FAKE_PI_MODE"] = "quota"
         result = self.dispatch()

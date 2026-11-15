@@ -85,7 +85,7 @@ class SkillCommandContractTests(unittest.TestCase):
                       for label in re.findall(r"`([^`]+)`", line.split("|", 2)[1])}
         expected = {
             "roles", "quota_stop.exit_statuses", "quota_stop.patterns",
-            "quota_retry_minutes", "worker_timeout_minutes", "test_timeout_minutes",
+            "quota_retry_minutes", "quota_ceiling_percent", "worker_timeout_minutes", "test_timeout_minutes",
             "stale_after_minutes", "skill_dirs", "auto_merge", "high_risk_paths", "owner_approval_paths",
             "tests.focused", "tests.full", "record_retention.archive_after_days",
             "record_retention.archive_dir", "record_retention.delete_after_days",
@@ -93,7 +93,7 @@ class SkillCommandContractTests(unittest.TestCase):
         self.assertEqual(documented, expected)
         example = json.loads((ROOT / "af.config.example.json").read_text())
         self.assertEqual(set(example), FIELDS)
-        self.assertTrue(all(set(candidate) <= {"via", "provider", "model", "profile", "company"}
+        self.assertTrue(all(set(candidate) <= {"via", "provider", "model", "profile", "company", "quota_provider", "quota_windows"}
                             for candidates in example["roles"].values() for candidate in candidates))
         self.assertNotIn(429, example["quota_stop"]["exit_statuses"])
 
