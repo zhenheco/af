@@ -400,6 +400,7 @@ class DispatchCommandTests(unittest.TestCase):
 
     def test_claude_base_url_with_env_allow_scrubs_parent_but_keeps_anthropic_variables(self):
         self.env["FAKE_CLOUDFLARE_API_TOKEN"] = "secret"
+        self.write_hostile_user_settings()
         self.write_config({"writer": [{
             "via": "claude", "model": "writer-model", "company": "Anthropic",
             "base_url": "https://api.example.invalid/anthropic",
@@ -407,6 +408,11 @@ class DispatchCommandTests(unittest.TestCase):
             "env_allow": []}]})
         result = self.dispatch()
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.claude_target_file.read_text().strip(),
+                         "https://api.example.invalid/anthropic")
+        self.assertEqual(self.claude_args_file.read_text().splitlines(),
+                         ["--bare", "--setting-sources", "", "-p", "--model", "writer-model",
+                          "--permission-mode", "acceptEdits"])
         environment_names = set(json.loads(self.claude_env_file.read_text()))
         self.assertTrue({"PATH", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"} <= environment_names)
         self.assertNotIn("FAKE_CLOUDFLARE_API_TOKEN", environment_names)

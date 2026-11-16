@@ -99,6 +99,8 @@ def invoke(candidate, worktree, prompt, timeout, paths):
         if "tools" in candidate:
             command.extend(["--tools", ",".join(candidate["tools"]),
                             "--permission-mode", "acceptEdits", "--strict-mcp-config"])
+        elif "base_url" in candidate:
+            command.extend(["--permission-mode", "acceptEdits"])
     else:
         command = ["codex", "exec", "-p", candidate["profile"], "-s", "workspace-write",
                    "-C", str(worktree), "-"]
