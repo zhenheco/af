@@ -91,7 +91,7 @@ def invoke(candidate, worktree, prompt, timeout, paths):
             key, failure = resolve_api_key(candidate, worktree, environment, paths)
             if failure:
                 return failure
-            command.insert(1, "--bare")
+            command[1:1] = ["--bare", "--setting-sources", ""]
             environment = dict(environment) if environment is not None else dict(os.environ)
             environment["ANTHROPIC_BASE_URL"] = candidate["base_url"]
             environment["ANTHROPIC_API_KEY"] = key
@@ -99,6 +99,8 @@ def invoke(candidate, worktree, prompt, timeout, paths):
         if "tools" in candidate:
             command.extend(["--tools", ",".join(candidate["tools"]),
                             "--permission-mode", "acceptEdits", "--strict-mcp-config"])
+        elif "base_url" in candidate:
+            command.extend(["--permission-mode", "acceptEdits"])
     else:
         command = ["codex", "exec", "-p", candidate["profile"], "-s", "workspace-write",
                    "-C", str(worktree), "-"]

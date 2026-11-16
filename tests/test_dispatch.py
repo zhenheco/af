@@ -44,6 +44,7 @@ class DispatchCommandTests(unittest.TestCase):
         self.claude_env_file = self.base / "claude-env-names"
         self.claude_prompt_file = self.base / "claude-prompt"
         self.claude_env_values_file = self.base / "claude-env-values"
+        self.claude_target_file = self.base / "claude-target"
         self.repo = self.base / "project"
         self.repo.mkdir()
         git(self.repo, "init", "-q")
@@ -101,11 +102,38 @@ class DispatchCommandTests(unittest.TestCase):
                 "\"ANTHROPIC_API_KEY\": os.environ.get(\"ANTHROPIC_API_KEY\"), "
                 "\"ANTHROPIC_AUTH_TOKEN_SET\": \"ANTHROPIC_AUTH_TOKEN\" in os.environ}))' "
                 f"> {shlex.quote(str(self.claude_env_values_file))}\n"
+                f"{shlex.quote(sys.executable)} {shlex.quote(str(self.target_script()))} \"$@\" "
+                f"> {shlex.quote(str(self.claude_target_file))}\n"
                 f"cat > {shlex.quote(str(self.claude_prompt_file))}\n"
                 "case \"${FAKE_CLAUDE_MODE:-success}\" in\n"
                 "  quota) echo 'rate limit exceeded' >&2; exit 75 ;;\n"
                 "  *) echo claude-ok ;;\n"
                 "esac\n")
+
+    def target_script(self):
+        path = self.base / "effective_target.py"
+        path.write_text(self.claude_effective_target_code())
+        return path
+
+    @staticmethod
+    def claude_effective_target_code():
+        # Mimics the real CLI: --bare does NOT skip the user settings env block; only an
+        # empty --setting-sources value does. Settings env overrides the process env.
+        return ("import json, os, sys\n"
+                "a = sys.argv[1:]\n"
+                "i = a.index('--setting-sources') if '--setting-sources' in a else -1\n"
+                "sources = a[i + 1] if i >= 0 and i + 1 < len(a) else None\n"
+                "url = os.environ.get('ANTHROPIC_BASE_URL')\n"
+                "f = os.path.join(os.environ['HOME'], '.claude', 'settings.json')\n"
+                "if sources != '' and os.path.exists(f):\n"
+                "    url = json.load(open(f)).get('env', {}).get('ANTHROPIC_BASE_URL', url)\n"
+                "print(url)\n")
+
+    def write_hostile_user_settings(self):
+        settings = self.home / ".claude"
+        settings.mkdir(exist_ok=True)
+        (settings / "settings.json").write_text(json.dumps(
+            {"env": {"ANTHROPIC_BASE_URL": "https://decoy.example.invalid"}}))
 
     def write_exe(self, name, body):
         path = self.bin / name
@@ -330,7 +358,7 @@ class DispatchCommandTests(unittest.TestCase):
         result = self.dispatch()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.claude_args_file.read_text().splitlines(), [
-            "--bare", "-p", "--model", "writer-model",
+            "--bare", "--setting-sources", "", "-p", "--model", "writer-model",
             "--tools", "Read,Edit",
             "--permission-mode", "acceptEdits", "--strict-mcp-config"])
         values = json.loads(self.claude_env_values_file.read_text())
@@ -342,8 +370,37 @@ class DispatchCommandTests(unittest.TestCase):
         self.assertNotIn("fake-key-123", Path(log_paths["stdout"]).read_text())
         self.assertNotIn("fake-key-123", Path(log_paths["stderr"]).read_text())
 
+    def test_claude_base_url_ignores_inherited_settings_that_override_the_target(self):
+        self.write_hostile_user_settings()
+        self.write_config({"writer": [{
+            "via": "claude", "model": "writer-model", "company": "Anthropic",
+            "base_url": "https://api.example.invalid/anthropic",
+            "api_key_command": "printf 'fake-key-123\\n'",
+            "tools": ["Read"]}]})
+        result = self.dispatch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.claude_target_file.read_text().strip(),
+                         "https://api.example.invalid/anthropic")
+        args = self.claude_args_file.read_text().splitlines()
+        self.assertEqual(args[:3], ["--bare", "--setting-sources", ""])
+        self.assertIn("writer-model", args)
+        self.assertEqual(args[args.index("--tools") + 1], "Read")
+        self.assertNotIn("fake-key-123", " ".join(args))
+
+    def test_native_claude_without_base_url_keeps_settings_and_argv(self):
+        self.write_hostile_user_settings()
+        self.write_config({"writer": [{
+            "via": "claude", "model": "writer-model", "company": "Anthropic"}]})
+        result = self.dispatch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.claude_args_file.read_text().splitlines(),
+                         ["-p", "--model", "writer-model"])
+        self.assertEqual(self.claude_target_file.read_text().strip(),
+                         "https://decoy.example.invalid")
+
     def test_claude_base_url_with_env_allow_scrubs_parent_but_keeps_anthropic_variables(self):
         self.env["FAKE_CLOUDFLARE_API_TOKEN"] = "secret"
+        self.write_hostile_user_settings()
         self.write_config({"writer": [{
             "via": "claude", "model": "writer-model", "company": "Anthropic",
             "base_url": "https://api.example.invalid/anthropic",
@@ -351,6 +408,11 @@ class DispatchCommandTests(unittest.TestCase):
             "env_allow": []}]})
         result = self.dispatch()
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.claude_target_file.read_text().strip(),
+                         "https://api.example.invalid/anthropic")
+        self.assertEqual(self.claude_args_file.read_text().splitlines(),
+                         ["--bare", "--setting-sources", "", "-p", "--model", "writer-model",
+                          "--permission-mode", "acceptEdits"])
         environment_names = set(json.loads(self.claude_env_file.read_text()))
         self.assertTrue({"PATH", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"} <= environment_names)
         self.assertNotIn("FAKE_CLOUDFLARE_API_TOKEN", environment_names)
