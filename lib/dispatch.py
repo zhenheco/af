@@ -112,9 +112,13 @@ def invoke(candidate, worktree, prompt, timeout, paths):
                 return failure
             # Isolated home: the user's own settings (oauth) would otherwise win over GEMINI_API_KEY.
             gemini_home = tempfile.mkdtemp(prefix="af-gemini-")
-            settings = Path(gemini_home, ".gemini", "settings.json")
-            settings.parent.mkdir()
-            settings.write_text(json.dumps({"security": {"auth": {"selectedType": "gemini-api-key"}}}))
+            try:
+                settings = Path(gemini_home, ".gemini", "settings.json")
+                settings.parent.mkdir()
+                settings.write_text(json.dumps({"security": {"auth": {"selectedType": "gemini-api-key"}}}))
+            except BaseException:  # the later try/finally does not cover this setup
+                shutil.rmtree(gemini_home, ignore_errors=True)
+                raise
             environment = dict(environment) if environment is not None else dict(os.environ)
             environment["GEMINI_CLI_HOME"] = gemini_home
             environment["GEMINI_API_KEY"] = key

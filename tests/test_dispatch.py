@@ -171,6 +171,18 @@ class DispatchCommandTests(unittest.TestCase):
                 stderr_log = Path(record["attempts"][0]["log_paths"]["stderr"]).read_text()
                 self.assertIn("api_key_command failed", stderr_log)
 
+    def test_gemini_settings_write_failure_removes_isolated_home_and_propagates(self):
+        home = Path(tempfile.mkdtemp(prefix="af-gemini-test-"))
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        paths = {"stdout": str(self.base / "out"), "stderr": str(self.base / "err")}
+        candidate = {"via": "gemini", "model": "m", "company": "Google",
+                     "api_key_command": "printf 'fake-gemini-key\\n'"}
+        with mock.patch.object(dispatch_module.tempfile, "mkdtemp", return_value=str(home)), \
+                mock.patch.object(Path, "write_text", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                dispatch_module.invoke(candidate, self.repo, "p", 5, paths)
+        self.assertFalse(home.exists())
+
     def target_script(self):
         path = self.base / "effective_target.py"
         path.write_text(self.claude_effective_target_code())
