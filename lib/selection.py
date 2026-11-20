@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import urllib.request
 
@@ -20,11 +21,14 @@ def fetch_quotas():
     return data
 
 def over_ceiling(candidate, quotas, ceiling):
-    """Return (window name, used) of the first window at or over ceiling, else None; None if provider absent."""
+    """Return (window name, used) of the first window at or over ceiling, else None; "missing" if provider absent. Entries holding a positive balance are never over."""
     entries = [e for e in quotas if isinstance(e, dict) and e.get("provider") == candidate["quota_provider"]]
     if not entries: return "missing"
     wanted = candidate.get("quota_windows")
     for entry in entries:
+        # purchased credits keep the account usable past a full window; balance is a free-form display string
+        balance = entry.get("balance")
+        if isinstance(balance, str) and re.search(r"[1-9]", balance): continue
         for window in entry.get("windows") or []:
             if not isinstance(window, dict) or window.get("unlimited"): continue
             used = window.get("used")

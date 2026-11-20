@@ -126,6 +126,24 @@ class ChooseQuotaTests(unittest.TestCase):
                              {"provider": "codex", "windows": [W("5 hours", 90)]}))
         self.assertEqual(self.run_choose(self.pair())["selected"]["model"], "b")
 
+    def test_balance_with_positive_amount_keeps_candidate(self):
+        for balance in ("5761.98 credits", "$12.40", "1.2K credits", "¥193.45 · $0.00"):
+            self.serve(self.data({"provider": "codex", "kind": "subscription", "balance": balance,
+                                  "windows": [W("5 hours", 0), W("7 days", 100)]}))
+            result = self.run_choose(self.pair())
+            self.assertEqual(result["selected"]["model"], "a", balance)
+            self.assertNotIn("quota_skipped", result)
+
+    def test_missing_zero_or_non_string_balance_still_skips(self):
+        for extra in ({}, {"balance": "0 credits"}, {"balance": "$0.00"}, {"balance": 5761.98}, {"balance": None}):
+            self.serve(self.data({"provider": "codex", "windows": [W("7 days", 100)], **extra}))
+            self.assertEqual(self.run_choose(self.pair())["selected"]["model"], "b", extra)
+
+    def test_balance_is_per_account(self):
+        self.serve(self.data({"provider": "codex", "balance": "9 credits", "windows": [W("5 hours", 100)]},
+                             {"provider": "codex", "windows": [W("5 hours", 100)]}))
+        self.assertEqual(self.run_choose(self.pair())["selected"]["model"], "b")
+
     def test_fetch_failures_fail_open_with_quota_check(self):
         cases = {"bad json": (b"not json", 200), "wrong shape": ({"data": "x"}, 200),
                  "http error": ({"data": []}, 500)}
