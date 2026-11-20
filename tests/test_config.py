@@ -65,6 +65,35 @@ class ConfigTests(unittest.TestCase):
             {"via": "host", "model": "claude-sonnet", "company": "Anthropic"},
         ]}})
 
+    def test_gemini_candidate_accepts_model_and_optional_settings(self):
+        validate_config({"roles": {"review": [
+            {"via": "gemini", "model": "gemini-3.8-flash", "company": "Google"},
+            {"via": "gemini", "model": "gemini-3.8-flash", "company": "Google",
+             "api_key_command": "printf key", "quota_provider": "gemini",
+             "quota_windows": ["daily"]}]}})
+
+    def test_gemini_candidate_rejects_missing_model_bad_values_and_unknown_keys(self):
+        base = {"via": "gemini", "model": "m", "company": "Google"}
+        candidates = [
+            {"via": "gemini", "company": "Google"},
+            dict(base, model=""),
+            dict(base, model=7),
+            dict(base, api_key_command=""),
+            dict(base, api_key_command=["printf k"]),
+            dict(base, tools=["Read"]),
+            dict(base, env_allow=[]),
+            dict(base, base_url="https://api.example.invalid"),
+            dict(base, profile="p"),
+            {"via": "gemini", "model": "m"},
+        ]
+        for candidate in candidates:
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                validate_config({"roles": {"review": [candidate]}})
+
+    def test_unknown_via_error_names_gemini(self):
+        with self.assertRaisesRegex(ValueError, "pi, codex, claude, gemini, or host"):
+            validate_config({"roles": {"writer": [{"via": "nope", "company": "X"}]}})
+
     def test_project_high_risk_patterns_still_union_with_global_baseline(self):
         self.write_json(self.global_config, {
             "high_risk_paths": ["auth/", "billing/", "shared", "shared"],

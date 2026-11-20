@@ -56,6 +56,8 @@ class DispatchCommandTests(unittest.TestCase):
         self.write_exe("pi", self.pi_script())
         self.write_exe("claude", self.claude_script())
         self.write_exe("codex", "#!/bin/sh\necho codex-ok\n")
+        self.gemini_record = self.base / "gemini-record.json"
+        self.write_exe("gemini", self.gemini_script())
         created = self.run_af("worktree", "create", "--repo", self.repo,
                               "--flow-id", "dispatch-001")
         self.assertEqual(created.returncode, 0, created.stderr)
@@ -109,6 +111,65 @@ class DispatchCommandTests(unittest.TestCase):
                 "  quota) echo 'rate limit exceeded' >&2; exit 75 ;;\n"
                 "  *) echo claude-ok ;;\n"
                 "esac\n")
+
+    def gemini_script(self):
+        # Records argv, stdin, cwd, the two env values and the isolated settings file as seen during the run.
+        code = ("import json, os, sys\n"
+                "home = os.environ.get('GEMINI_CLI_HOME')\n"
+                "f = os.path.join(home, '.gemini', 'settings.json') if home else None\n"
+                "json.dump({'argv': sys.argv[1:], 'stdin': sys.stdin.read(), 'cwd': os.getcwd(),\n"
+                "  'key': os.environ.get('GEMINI_API_KEY'), 'home': home,\n"
+                "  'settings': open(f).read() if f and os.path.exists(f) else None},\n"
+                f"  open({str(self.gemini_record)!r}, 'w'))\n"
+                "print('gemini-ok')\n")
+        return f"#!/bin/sh\nexec {shlex.quote(sys.executable)} -c {shlex.quote(code)} \"$@\"\n"
+
+    def test_gemini_runs_read_only_plan_mode_with_prompt_on_stdin(self):
+        self.env.pop("GEMINI_API_KEY", None)
+        self.env.pop("GEMINI_CLI_HOME", None)
+        self.write_config({"writer": [{"via": "gemini", "model": "gemini-3.8-flash", "company": "Google"}]})
+        result = self.dispatch("review the fixture")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        seen = json.loads(self.gemini_record.read_text())
+        self.assertEqual(seen["argv"], ["--skip-trust", "--approval-mode", "plan",
+                                        "-m", "gemini-3.8-flash", "-p", ""])
+        self.assertIn("review the fixture", seen["stdin"])
+        self.assertEqual(os.path.realpath(seen["cwd"]), os.path.realpath(self.worktree))
+        self.assertIsNone(seen["key"])
+        self.assertIsNone(seen["home"])
+        attempt = json.loads(result.stdout)["attempts"][0]
+        self.assertIn("gemini-ok", Path(attempt["log_paths"]["stdout"]).read_text())
+
+    def test_gemini_api_key_command_uses_isolated_home_removed_afterwards(self):
+        self.write_config({"writer": [{"via": "gemini", "model": "gemini-3.8-flash", "company": "Google",
+                                       "api_key_command": "printf 'fake-gemini-key\\n'"}]})
+        result = self.dispatch("review the fixture")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        seen = json.loads(self.gemini_record.read_text())
+        self.assertEqual(seen["key"], "fake-gemini-key")
+        self.assertEqual(json.loads(seen["settings"]),
+                         {"security": {"auth": {"selectedType": "gemini-api-key"}}})
+        self.assertNotIn(str(self.home), seen["home"])
+        self.assertFalse(Path(seen["home"]).exists())
+        self.assertNotIn("fake-gemini-key", " ".join(seen["argv"]))
+        self.assertNotIn("fake-gemini-key", result.stdout)
+        log_paths = json.loads(result.stdout)["attempts"][0]["log_paths"]
+        self.assertNotIn("fake-gemini-key", Path(log_paths["stdout"]).read_text())
+        self.assertNotIn("fake-gemini-key", Path(log_paths["stderr"]).read_text())
+
+    def test_gemini_api_key_command_failure_skips_gemini(self):
+        for command in ("exit 3", "true"):
+            with self.subTest(command=command):
+                self.gemini_record.unlink(missing_ok=True)
+                self.write_config({"writer": [{"via": "gemini", "model": "m", "company": "Google",
+                                               "api_key_command": command}]})
+                result = self.dispatch("review")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.gemini_record.exists())
+                record = json.loads(result.stdout)
+                self.assertEqual(record["attempts"][0]["exit_status"], 1)
+                stderr_log = Path(record["attempts"][0]["log_paths"]["stderr"]).read_text()
+                self.assertIn("api_key_command failed", stderr_log)
 
     def target_script(self):
         path = self.base / "effective_target.py"

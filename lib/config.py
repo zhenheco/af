@@ -178,7 +178,7 @@ def require_number(value, name, minimum, integer=False):
 def validate_config(config):
     require_object(config, "config", FIELDS)
     roles = require_object(config.get("roles", {}), "roles")
-    settings = {"pi": {"provider", "model"}, "codex": {"profile"}, "claude": {"model"}, "host": {"model"}}
+    settings = {"pi": {"provider", "model"}, "codex": {"profile"}, "claude": {"model"}, "gemini": {"model"}, "host": {"model"}}
     for role, candidates in roles.items():
         if not isinstance(role, str) or not isinstance(candidates, list):
             raise ValueError("roles must map role names to candidate arrays")
@@ -192,10 +192,12 @@ def validate_config(config):
                 allowed |= {"tools", "env_allow"}
             if via == "claude":
                 allowed |= {"base_url", "api_key_command"}
+            if via == "gemini":
+                allowed.add("api_key_command")
             if via == "host":
                 allowed.add("agent")
             if required is None or set(candidate) - allowed:
-                raise ValueError(f"role {role} candidate must use pi, codex, claude, or host settings")
+                raise ValueError(f"role {role} candidate must use pi, codex, claude, gemini, or host settings")
             if any(not isinstance(candidate.get(key), str) or not candidate[key] for key in required):
                 raise ValueError(f"role {role} candidate is missing CLI settings")
             if not isinstance(candidate.get("company"), str) or not candidate["company"].strip():
@@ -227,6 +229,9 @@ def validate_config(config):
                         or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
                                 for name in env_allow)):
                     raise ValueError(f"role {role} candidate env_allow must be an array of valid environment names")
+            if via == "gemini" and "api_key_command" in candidate and (
+                    not isinstance(candidate["api_key_command"], str) or not candidate["api_key_command"]):
+                raise ValueError(f"role {role} candidate api_key_command must be a nonempty string")
             if via == "claude":
                 has_base_url = "base_url" in candidate
                 has_api_key_command = "api_key_command" in candidate

@@ -7,9 +7,11 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 
 from config import load_recorded_config
 from selection import REVIEW_ROLES, choose
@@ -71,7 +73,7 @@ def resolve_api_key(candidate, worktree, environment, paths):
     return None, (1, text, False)
 
 def invoke(candidate, worktree, prompt, timeout, paths):
-    environment = None
+    environment = gemini_home = None
     if candidate["via"] in ("pi", "claude") and "env_allow" in candidate:
         allowed_environment = {
             "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "TMPDIR", "SHELL",
@@ -101,26 +103,45 @@ def invoke(candidate, worktree, prompt, timeout, paths):
                             "--permission-mode", "acceptEdits", "--strict-mcp-config"])
         elif "base_url" in candidate:
             command.extend(["--permission-mode", "acceptEdits"])
+    elif candidate["via"] == "gemini":
+        # Read-only (plan mode): for review roles. --skip-trust: the CLI refuses an untrusted folder.
+        command = ["gemini", "--skip-trust", "--approval-mode", "plan", "-m", candidate["model"], "-p", ""]
+        if "api_key_command" in candidate:
+            key, failure = resolve_api_key(candidate, worktree, environment, paths)
+            if failure:
+                return failure
+            # Isolated home: the user's own settings (oauth) would otherwise win over GEMINI_API_KEY.
+            gemini_home = tempfile.mkdtemp(prefix="af-gemini-")
+            settings = Path(gemini_home, ".gemini", "settings.json")
+            settings.parent.mkdir()
+            settings.write_text(json.dumps({"security": {"auth": {"selectedType": "gemini-api-key"}}}))
+            environment = dict(environment) if environment is not None else dict(os.environ)
+            environment["GEMINI_CLI_HOME"] = gemini_home
+            environment["GEMINI_API_KEY"] = key
     else:
         command = ["codex", "exec", "-p", candidate["profile"], "-s", "workspace-write",
                    "-C", str(worktree), "-"]
 
-    with Path(paths["stdout"]).open("w") as stdout, Path(paths["stderr"]).open("w") as stderr:
-        process = subprocess.Popen(command, cwd=worktree, stdin=subprocess.PIPE, text=True,
-                                   stdout=stdout, stderr=stderr, start_new_session=True,
-                                   env=environment)
-        timed_out = False
-        try:
-            process.communicate(input=prompt, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            signal_group(process.pid, signal.SIGTERM)
+    try:
+        with Path(paths["stdout"]).open("w") as stdout, Path(paths["stderr"]).open("w") as stderr:
+            process = subprocess.Popen(command, cwd=worktree, stdin=subprocess.PIPE, text=True,
+                                       stdout=stdout, stderr=stderr, start_new_session=True,
+                                       env=environment)
+            timed_out = False
             try:
-                process.wait(timeout=0.25)
+                process.communicate(input=prompt, timeout=timeout)
             except subprocess.TimeoutExpired:
-                pass
-            signal_group(process.pid, signal.SIGKILL)
-        process.communicate()
+                timed_out = True
+                signal_group(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=0.25)
+                except subprocess.TimeoutExpired:
+                    pass
+                signal_group(process.pid, signal.SIGKILL)
+            process.communicate()
+    finally:
+        if gemini_home:
+            shutil.rmtree(gemini_home, ignore_errors=True)
 
     stderr_text = Path(paths["stderr"]).read_text(errors="replace")
     return (124 if timed_out else process.returncode), stderr_text, timed_out
