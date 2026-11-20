@@ -163,13 +163,15 @@ Done when the commit exists on `af/<id>` and the step is marked completed.
 
 The host decides the tier before the review step (definitions in `rules/hard-rules.md` rule 5, owner 2026-11-12). A diff matching `high_risk_paths` is HIGH and cannot be downgraded; the host may only raise a tier. An unclear tier is MEDIUM. The tier chooses the step:
 
-- **HIGH**: two parallel `big_review`/`small_review` dispatches (standards, behavior) with `--writer-company` set to the author's company, as below. At the milestone the two executions may both be Codex `sol`; cross-company means different from the author's company.
-- **MEDIUM**: ONE `medium_review` dispatch with `--writer-company`, with a single prompt covering standards and behavior; run it once before merge. The shipped default candidate is the host (Opus, Anthropic), so the reviewer may be the same company as the writer for this role; af's selection still prefers another company when `medium_review` has a candidate from one.
+- **HIGH**: two parallel `big_review`/`small_review` dispatches (standards, behavior) with `--writer-company` set to the author's company, as in Parallel reviews below. At the milestone the two executions may both be Codex `sol`; cross-company means different from the author's company.
+- **MEDIUM**: ONE `medium_review` dispatch with `--writer-company`, with a single prompt covering standards and behavior; run it once before merge. The shipped default candidate is the host (Opus, Anthropic), so the reviewer may be the same company as the writer for this role; af's selection still prefers another company when `medium_review` has a candidate from one. If the flow's pinned config has no `medium_review` role (a config copied before this role existed, or a flow started before it was added; `af select` exits 2 with `role not configured: medium_review`), use one `small_review` dispatch instead.
 - **LOW**: no dispatch. The host reads the `base_sha...HEAD` diff and records that in the round log.
 
 `--reviews pass` in `gate decide`/`gate merge` means the tier's requirement above was met.
 
 `code-review` in a chain is the name of the flow step, not the skill: inside an af flow the host does not invoke the `code-review` skill, whose own two sub-agents would bypass af dispatch. Review is only the tier-driven `af dispatch` above. Put this severity bar in every review prompt: Mark BLOCKING only what gives a wrong result for a realistic repository state, breaks CI, or loses data; everything else is NON-BLOCKING. Against `base_sha...HEAD`: select a reviewer, dispatch, and read the report. Reviewers come only from `af select`/`af dispatch` with `--writer-company` set to the author's company, never a self-picked CLI such as Gemini (selection rules are in Reference).
+
+MEDIUM example:
 
 ```sh
 af select --repo "$W" --flow-id <id> --role medium_review --writer-company <writer-company>

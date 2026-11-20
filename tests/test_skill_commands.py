@@ -75,6 +75,15 @@ class SkillCommandContractTests(unittest.TestCase):
         self.assertIn('af state complete --repo "$P"', retro)
         self.assertNotIn('--repo "$W"', retro)
 
+    def test_review_tier_bullets_point_at_matching_command_blocks(self):
+        skill = (ROOT / "skills" / "af" / "SKILL.md").read_text()
+        high = next(line for line in skill.splitlines() if line.startswith("- **HIGH**"))
+        medium = next(line for line in skill.splitlines() if line.startswith("- **MEDIUM**"))
+        self.assertIn("Parallel reviews", high)
+        self.assertNotIn("as below", high)
+        self.assertIn("small_review", medium)
+        self.assertIn("role not configured: medium_review", medium)
+
     def test_cleanup_documentation_matches_supported_command(self):
         skill = (ROOT / "skills" / "af" / "SKILL.md").read_text()
         self.assertIn('af cleanup --repo "$R"', skill)
