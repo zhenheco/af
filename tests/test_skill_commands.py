@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 from af import build_parser
 from config import FIELDS
+from selection import REVIEW_ROLES
 
 
 def skill_commands():
@@ -74,6 +75,15 @@ class SkillCommandContractTests(unittest.TestCase):
         self.assertIn('af state complete --repo "$P"', retro)
         self.assertNotIn('--repo "$W"', retro)
 
+    def test_review_tier_bullets_point_at_matching_command_blocks(self):
+        skill = (ROOT / "skills" / "af" / "SKILL.md").read_text()
+        high = next(line for line in skill.splitlines() if line.startswith("- **HIGH**"))
+        medium = next(line for line in skill.splitlines() if line.startswith("- **MEDIUM**"))
+        self.assertIn("Parallel reviews", high)
+        self.assertNotIn("as below", high)
+        self.assertIn("small_review", medium)
+        self.assertIn("role not configured: medium_review", medium)
+
     def test_cleanup_documentation_matches_supported_command(self):
         skill = (ROOT / "skills" / "af" / "SKILL.md").read_text()
         self.assertIn('af cleanup --repo "$R"', skill)
@@ -96,6 +106,8 @@ class SkillCommandContractTests(unittest.TestCase):
         self.assertTrue(all(set(candidate) <= {"via", "provider", "model", "profile", "company", "quota_provider", "quota_windows"}
                             for candidates in example["roles"].values() for candidate in candidates))
         self.assertNotIn(429, example["quota_stop"]["exit_statuses"])
+        self.assertIn("medium_review", example["roles"])
+        self.assertIn("medium_review", REVIEW_ROLES)
 
     def test_public_spec_has_no_owner_specific_examples_or_migration_section(self):
         spec = (ROOT / "docs" / "SPEC.md").read_text()
