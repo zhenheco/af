@@ -8,7 +8,7 @@ import urllib.request
 from config import load_config, load_recorded_config
 from state import read_record, state_path
 
-REVIEW_ROLES = {"small_review", "big_review"}
+REVIEW_ROLES = {"small_review", "medium_review", "big_review"}
 
 DEFAULT_QUOTA_URL = "http://127.0.0.1:3425/v1/magpie/quotas"
 

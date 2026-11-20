@@ -7,6 +7,9 @@
     "small_review": [
       {"via": "host", "model": "claude-sonnet", "company": "Anthropic"}
     ],
+    "medium_review": [
+      {"via": "host", "model": "opus", "company": "Anthropic"}
+    ],
     "big_review": [
       {"via": "pi", "provider": "example-review-provider", "model": "example-reviewer", "company": "Reviewer Co"}
     ]

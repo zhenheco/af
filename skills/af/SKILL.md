@@ -164,7 +164,7 @@ Done when the commit exists on `af/<id>` and the step is marked completed.
 The host decides the tier before the review step (definitions in `rules/hard-rules.md` rule 5, owner 2026-11-12). A diff matching `high_risk_paths` is HIGH and cannot be downgraded; the host may only raise a tier. An unclear tier is MEDIUM. The tier chooses the step:
 
 - **HIGH**: two parallel `big_review`/`small_review` dispatches (standards, behavior) with `--writer-company` set to the author's company, as below. At the milestone the two executions may both be Codex `sol`; cross-company means different from the author's company.
-- **MEDIUM**: ONE `small_review` dispatch with `--writer-company`, with a single prompt covering standards and behavior; run it once before merge. af's selection picks the reviewer and it may be another company. Outside af a MEDIUM reviewer may be a fresh-context subagent of the writer's company; inside an af flow the shipped config has no review role whose candidates all share the writer's company, so the MEDIUM reviewer is whoever `small_review` selects.
+- **MEDIUM**: ONE `medium_review` dispatch with `--writer-company`, with a single prompt covering standards and behavior; run it once before merge. The shipped default candidate is the host (Opus, Anthropic), so the reviewer may be the same company as the writer for this role; af's selection still prefers another company when `medium_review` has a candidate from one.
 - **LOW**: no dispatch. The host reads the `base_sha...HEAD` diff and records that in the round log.
 
 `--reviews pass` in `gate decide`/`gate merge` means the tier's requirement above was met.
@@ -172,8 +172,8 @@ The host decides the tier before the review step (definitions in `rules/hard-rul
 `code-review` in a chain is the name of the flow step, not the skill: inside an af flow the host does not invoke the `code-review` skill, whose own two sub-agents would bypass af dispatch. Review is only the tier-driven `af dispatch` above. Put this severity bar in every review prompt: Mark BLOCKING only what gives a wrong result for a realistic repository state, breaks CI, or loses data; everything else is NON-BLOCKING. Against `base_sha...HEAD`: select a reviewer, dispatch, and read the report. Reviewers come only from `af select`/`af dispatch` with `--writer-company` set to the author's company, never a self-picked CLI such as Gemini (selection rules are in Reference).
 
 ```sh
-af select --repo "$W" --flow-id <id> --role small_review --writer-company <writer-company>
-af dispatch --worktree "$W" --flow-id <id> --role small_review --writer-company <writer-company> \
+af select --repo "$W" --flow-id <id> --role medium_review --writer-company <writer-company>
+af dispatch --worktree "$W" --flow-id <id> --role medium_review --writer-company <writer-company> \
   --prompt "Review the flow changes." > "$S/review-1.json"
 ```
 
@@ -205,7 +205,7 @@ Done when every report is read and its findings are listed.
 
 ## 5. Repair rounds
 
-Collect the findings and fix them in one writer run. A MEDIUM or LOW repair round needs focused tests and no repeated review; MEDIUM's final repair diff is still reviewed by one `small_review` dispatch before the gate decision.
+Collect the findings and fix them in one writer run. A MEDIUM or LOW repair round needs focused tests and no repeated review; MEDIUM's final repair diff is still reviewed by one `medium_review` dispatch before the gate decision.
 
 HIGH changes (including configured high-risk paths) need two reviews on every round and the full suite. Loop until both reviews return no blocking findings, one writer per round:
 
@@ -225,7 +225,7 @@ HIGH changes (including configured high-risk paths) need two reviews on every ro
 
 5. Log the round (round number, findings, commit SHA with its full-suite result) in `$S/rounds.md`, so later rounds do not reopen settled items.
 
-Before the gate decision, review any final repair diff (MEDIUM: one `small_review` dispatch; LOW: the host reads it).
+Before the gate decision, review any final repair diff (MEDIUM: one `medium_review` dispatch; LOW: the host reads it).
 
 Done when the required reviews of the latest round (two for HIGH, one for MEDIUM, none for LOW) return no blocking findings and the round log shows every finding closed.
 
@@ -313,7 +313,7 @@ Dispatch passes a fixed writer or read-only reviewer role preamble and the promp
 
 ### Reviewer selection
 
-Reviewer selection prefers a different company when the role has any configured candidate from another company. Same-company review happens only when every candidate for that role has the writer's company; the shipped config has no such role. If all independent candidates stop for quota, dispatch returns `waiting_for_quota` and exits 75; wait `retry_after_minutes` and retry. A missing `pi`, `codex`, or `claude` CLI is skipped; `host` candidates are always available. `AF_NO_HOST=1` makes `host` candidates unavailable so a non-Claude host, or a host without quota for the configured host model, falls through to the next `pi`/`codex`/`claude` candidate.
+Reviewer selection prefers a different company when the role has any configured candidate from another company. Same-company review happens only when every candidate for that role has the writer's company; `medium_review` in the shipped example config has only a same-company host candidate (Opus, Anthropic), so same-company review happens there by design. If all independent candidates stop for quota, dispatch returns `waiting_for_quota` and exits 75; wait `retry_after_minutes` and retry. A missing `pi`, `codex`, or `claude` CLI is skipped; `host` candidates are always available. `AF_NO_HOST=1` makes `host` candidates unavailable so a non-Claude host, or a host without quota for the configured host model, falls through to the next `pi`/`codex`/`claude` candidate.
 
 `host` candidates mean the current host starts its own fresh subagent, so when the host differs from the one the config's `host` models belong to (for example, Pi or Codex with Claude models), use a config whose `host` entries match that host, or list `pi`/`codex`/`claude` reviewer candidates instead.
 

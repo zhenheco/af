@@ -122,6 +122,15 @@ class SelectCommandTests(unittest.TestCase):
         self.assertEqual(record["review"], "independent")
         self.assertEqual([item["via"] for item in record["candidates"]], ["pi"])
 
+    def test_medium_review_is_a_review_role_and_allows_same_company(self):
+        self.write_exe("codex")
+        path = self.config("medium.json", {"medium_review": [
+            self.candidate("codex", "Anthropic", "reviewer")]})
+        result = self.run_af("select", "--role", "medium_review", "--writer-company", "Anthropic",
+                             "--config", path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["review"], "same-company")
+
     def test_same_company_review_is_allowed_only_when_no_other_company_is_configured(self):
         self.write_exe("codex")
         path = self.config("single-company.json", {"small_review": [
