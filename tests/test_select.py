@@ -48,7 +48,7 @@ class SelectCommandTests(unittest.TestCase):
     def candidate(self, via, company, name):
         if via == "pi":
             return {"via": via, "provider": "openai", "model": name, "company": company}
-        if via == "host":
+        if via in ("host", "gemini"):
             return {"via": via, "model": name, "company": company}
         return {"via": via, "profile": name, "company": company}
 
@@ -73,6 +73,22 @@ class SelectCommandTests(unittest.TestCase):
         record = json.loads(result.stdout)
         self.assertEqual([item["via"] for item in record["candidates"]], ["codex"])
         self.assertEqual(record["selected"]["profile"], "second")
+
+    def test_gemini_candidate_is_selectable_only_when_on_path(self):
+        isolated = self.base / "minimal-path"
+        isolated.mkdir()
+        for name in ("bash", "python3", "dirname", "env", "git"):
+            (isolated / name).symlink_to(shutil.which(name))
+        self.env["PATH"] = f"{self.fake_bin}{os.pathsep}{isolated}"
+        path = self.config("gemini.json", {"review": [self.candidate("gemini", "Google", "g-model")]})
+        missing = self.run_af("select", "--role", "review", "--config", path)
+        self.assertEqual(missing.returncode, 2)
+        self.write_exe("gemini")
+        result = self.run_af("select", "--role", "review", "--config", path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(result.stdout)
+        self.assertEqual(record["selected"]["via"], "gemini")
+        self.assertEqual(record["selected"]["model"], "g-model")
 
     def test_select_uses_global_roles_when_project_config_omits_them(self):
         global_config = self.home / ".config" / "af" / "af.config.json"

@@ -10,7 +10,7 @@ from config import global_high_risk_patterns, load_config
 
 REQUIRED_SKILLS = ("grill-with-docs", "to-spec", "to-tickets", "implement-spec", "implement", "tdd",
                    "code-review", "diagnosing-bugs", "pr", "retro")
-OPTIONAL_TOOLS = ("pi", "codex", "claude", "gitleaks")
+OPTIONAL_TOOLS = ("pi", "codex", "claude", "gemini", "gitleaks")
 
 def skill_directories(config, repo):
     home = Path(os.environ.get("HOME", str(Path.home())))
